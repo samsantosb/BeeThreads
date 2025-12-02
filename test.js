@@ -765,6 +765,476 @@ async function runTests() {
     assert.ok(stats.metrics.totalTasksFailed >= 1);
   });
 
+  // ---------- EXECUTE WITHOUT USINGPARAMS ----------
+  section('Execute without usingParams()');
+
+  await test('execute() works directly without usingParams()', async () => {
+    const result = await beeThreads
+      .run(() => 'direct execute')
+      .execute();
+    assert.strictEqual(result, 'direct execute');
+  });
+
+  await test('execute() works directly for safeRun()', async () => {
+    const result = await beeThreads
+      .safeRun(() => 123)
+      .execute();
+    assert.strictEqual(result.status, 'fulfilled');
+    assert.strictEqual(result.value, 123);
+  });
+
+  await test('stream execute() works without usingParams()', async () => {
+    const stream = beeThreads
+      .stream(function* () {
+        yield 'a';
+        yield 'b';
+      })
+      .execute();
+
+    const chunks = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+    }
+    assert.deepStrictEqual(chunks, ['a', 'b']);
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- CONSOLE.LOG FORWARDING ----------
+  section('Console.log Forwarding');
+
+  await test('console.log in worker executes without error', async () => {
+    const result = await beeThreads
+      .run(() => {
+        console.log('test log from worker');
+        return 'logged';
+      })
+      .execute();
+    assert.strictEqual(result, 'logged');
+  });
+
+  await test('console.warn in worker executes without error', async () => {
+    const result = await beeThreads
+      .run(() => {
+        console.warn('test warning from worker');
+        return 'warned';
+      })
+      .execute();
+    assert.strictEqual(result, 'warned');
+  });
+
+  await test('console.error in worker executes without error', async () => {
+    const result = await beeThreads
+      .run(() => {
+        console.error('test error log from worker');
+        return 'error logged';
+      })
+      .execute();
+    assert.strictEqual(result, 'error logged');
+  });
+
+  await test('multiple console methods in worker', async () => {
+    const result = await beeThreads
+      .run(() => {
+        console.log('log');
+        console.info('info');
+        console.debug('debug');
+        console.warn('warn');
+        console.error('error');
+        return 'all logged';
+      })
+      .execute();
+    assert.strictEqual(result, 'all logged');
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- SETCONTEXT VALIDATION ----------
+  section('setContext() Validation');
+
+  await test('setContext() throws TypeError for null', () => {
+    assert.throws(
+      () => beeThreads.run((x) => x).setContext(null),
+      TypeError
+    );
+  });
+
+  await test('setContext() throws TypeError for non-object', () => {
+    assert.throws(
+      () => beeThreads.run((x) => x).setContext('not an object'),
+      TypeError
+    );
+  });
+
+  await test('setContext() works with array (arrays are objects)', async () => {
+    // Note: Arrays are valid objects in JS, so setContext accepts them
+    const result = await beeThreads
+      .run(() => arr.length)
+      .setContext({ arr: [1, 2, 3] })
+      .execute();
+    assert.strictEqual(result, 3);
+  });
+
+  await test('setContext() accepts empty object', async () => {
+    const result = await beeThreads
+      .run(() => 42)
+      .setContext({})
+      .execute();
+    assert.strictEqual(result, 42);
+  });
+
+  // ---------- TRANSFER (ARRAYBUFFER) ----------
+  section('Transfer (ArrayBuffer)');
+
+  await test('transfer() passes ArrayBuffer to worker', async () => {
+    const buffer = new ArrayBuffer(16);
+    const view = new Uint8Array(buffer);
+    view[0] = 42;
+    view[1] = 123;
+
+    const result = await beeThreads
+      .run((buf) => {
+        const arr = new Uint8Array(buf);
+        return arr[0] + arr[1];
+      })
+      .usingParams(buffer)
+      .transfer([buffer])
+      .execute();
+
+    assert.strictEqual(result, 165);
+    // Buffer should be detached after transfer
+    assert.strictEqual(buffer.byteLength, 0);
+  });
+
+  await test('transfer() works with large buffer', async () => {
+    const size = 1024 * 1024; // 1MB
+    const buffer = new ArrayBuffer(size);
+    const view = new Uint8Array(buffer);
+    view[0] = 1;
+    view[size - 1] = 2;
+
+    const result = await beeThreads
+      .run((buf) => {
+        const arr = new Uint8Array(buf);
+        return arr[0] + arr[arr.length - 1];
+      })
+      .usingParams(buffer)
+      .transfer([buffer])
+      .execute();
+
+    assert.strictEqual(result, 3);
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- STREAM ERROR HANDLING ----------
+  section('Stream Error Handling');
+
+  await beeThreads.shutdown();
+
+  await test('stream handles generator errors', async () => {
+    const stream = beeThreads
+      .stream(function* () {
+        yield 1;
+        throw new Error('generator error');
+      })
+      .execute();
+
+    const chunks = [];
+    try {
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+      assert.fail('Should have thrown');
+    } catch (err) {
+      assert.strictEqual(err.message, 'generator error');
+      assert.deepStrictEqual(chunks, [1]);
+    }
+  });
+
+  await beeThreads.shutdown();
+
+  await test('stream completes all values', async () => {
+    // Note: Early break/cancel causes worker termination (expected)
+    // This test verifies full stream consumption works
+    const stream = beeThreads
+      .stream(function* () {
+        yield 'first';
+        yield 'second';
+        yield 'third';
+      })
+      .execute();
+
+    const chunks = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+    }
+    
+    assert.deepStrictEqual(chunks, ['first', 'second', 'third']);
+  });
+
+  // ---------- QUEUE FULL ERROR ----------
+  section('QueueFullError');
+
+  await test('throws QueueFullError when queue is full', async () => {
+    beeThreads.configure({ 
+      poolSize: 1, 
+      maxTemporaryWorkers: 0,
+      maxQueueSize: 1 
+    });
+
+    // Start a long task to occupy the worker
+    const blockingTask = beeThreads
+      .run(() => {
+        const start = Date.now();
+        while (Date.now() - start < 200) {}
+        return 'done';
+      })
+      .execute();
+
+    // Give time for the task to start
+    await new Promise(r => setTimeout(r, 10));
+
+    // Queue one task (should succeed)
+    const queuedTask = beeThreads.run(() => 'queued').execute();
+
+    // Third task should fail - queue is full
+    await assert.rejects(
+      beeThreads.run(() => 'overflow').execute(),
+      QueueFullError
+    );
+
+    await Promise.all([blockingTask, queuedTask]);
+    await beeThreads.shutdown();
+    beeThreads.configure({ poolSize: 4, maxQueueSize: 1000, maxTemporaryWorkers: 10 });
+  });
+
+  await test('QueueFullError has correct properties', () => {
+    const err = new QueueFullError(100);
+    assert.strictEqual(err.name, 'QueueFullError');
+    assert.strictEqual(err.code, 'ERR_QUEUE_FULL');
+    assert.strictEqual(err.maxSize, 100);
+    assert.ok(err.message.includes('100'));
+  });
+
+  // ---------- CONCURRENT TASKS ----------
+  section('Concurrent Tasks');
+
+  await test('handles many concurrent tasks', async () => {
+    beeThreads.configure({ poolSize: 4 });
+    
+    const tasks = [];
+    for (let i = 0; i < 20; i++) {
+      tasks.push(
+        beeThreads
+          .run((n) => n * 2)
+          .usingParams(i)
+          .execute()
+      );
+    }
+
+    const results = await Promise.all(tasks);
+    
+    for (let i = 0; i < 20; i++) {
+      assert.strictEqual(results[i], i * 2);
+    }
+  });
+
+  await test('concurrent safeRun tasks all succeed', async () => {
+    const tasks = [];
+    for (let i = 0; i < 10; i++) {
+      tasks.push(
+        beeThreads
+          .safeRun((n) => n + 1)
+          .usingParams(i)
+          .execute()
+      );
+    }
+
+    const results = await Promise.all(tasks);
+    
+    for (let i = 0; i < 10; i++) {
+      assert.strictEqual(results[i].status, 'fulfilled');
+      assert.strictEqual(results[i].value, i + 1);
+    }
+  });
+
+  await test('mixed success and failure in concurrent tasks', async () => {
+    const tasks = [
+      beeThreads.safeRun(() => 1).execute(),
+      beeThreads.safeRun(() => { throw new Error('fail'); }).execute(),
+      beeThreads.safeRun(() => 3).execute(),
+    ];
+
+    const results = await Promise.all(tasks);
+    
+    assert.strictEqual(results[0].status, 'fulfilled');
+    assert.strictEqual(results[0].value, 1);
+    assert.strictEqual(results[1].status, 'rejected');
+    assert.strictEqual(results[2].status, 'fulfilled');
+    assert.strictEqual(results[2].value, 3);
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- WORKER IDLE TIMEOUT CONFIG ----------
+  section('Worker Idle Timeout Configuration');
+
+  await test('configure() accepts workerIdleTimeout', () => {
+    beeThreads.configure({ workerIdleTimeout: 60000 });
+    const stats = beeThreads.getPoolStats();
+    assert.strictEqual(stats.config.workerIdleTimeout, 60000);
+  });
+
+  await test('configure() throws for negative workerIdleTimeout', () => {
+    assert.throws(
+      () => beeThreads.configure({ workerIdleTimeout: -1 }),
+      TypeError
+    );
+  });
+
+  await test('configure() throws for non-number workerIdleTimeout', () => {
+    assert.throws(
+      () => beeThreads.configure({ workerIdleTimeout: 'fast' }),
+      TypeError
+    );
+  });
+
+  await test('workerIdleTimeout 0 disables idle cleanup', () => {
+    beeThreads.configure({ workerIdleTimeout: 0 });
+    const stats = beeThreads.getPoolStats();
+    assert.strictEqual(stats.config.workerIdleTimeout, 0);
+  });
+
+  beeThreads.configure({ workerIdleTimeout: 30000 });
+
+  // ---------- COMPLEX CONTEXT ----------
+  section('Complex Context Scenarios');
+
+  await test('setContext() with nested objects', async () => {
+    const config = {
+      db: { host: 'localhost', port: 5432 },
+      cache: { enabled: true, ttl: 3600 }
+    };
+
+    const result = await beeThreads
+      .run(() => config.db.host + ':' + config.db.port)
+      .setContext({ config })
+      .execute();
+
+    assert.strictEqual(result, 'localhost:5432');
+  });
+
+  await test('setContext() with arrays', async () => {
+    const items = [10, 20, 30];
+
+    const result = await beeThreads
+      .run(() => items.reduce((a, b) => a + b, 0))
+      .setContext({ items })
+      .execute();
+
+    assert.strictEqual(result, 60);
+  });
+
+  await test('setContext() with functions as strings', async () => {
+    const helperCode = '(x) => x * 2';
+
+    const result = await beeThreads
+      .run((val) => {
+        const helper = eval(helperCode);
+        return helper(val);
+      })
+      .usingParams(21)
+      .setContext({ helperCode })
+      .execute();
+
+    assert.strictEqual(result, 42);
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- FLUENT API ORDERING ----------
+  section('Fluent API Method Ordering');
+
+  await test('methods can be called in any order', async () => {
+    const factor = 2;
+    const controller = new AbortController();
+
+    const result = await beeThreads
+      .run((x) => x * factor)
+      .setContext({ factor })
+      .signal(controller.signal)
+      .retry({ maxAttempts: 2 })
+      .usingParams(21)
+      .execute();
+
+    assert.strictEqual(result, 42);
+  });
+
+  await test('reverse order also works', async () => {
+    const factor = 3;
+
+    const result = await beeThreads
+      .run((x) => x * factor)
+      .usingParams(14)
+      .retry({ maxAttempts: 2 })
+      .setContext({ factor })
+      .execute();
+
+    assert.strictEqual(result, 42);
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- METRICS ACCURACY ----------
+  section('Metrics Accuracy');
+
+  await test('totalTasksExecuted increments correctly', async () => {
+    await beeThreads.shutdown();
+    
+    const before = beeThreads.getPoolStats().metrics.totalTasksExecuted;
+    
+    await beeThreads.run(() => 1).execute();
+    await beeThreads.run(() => 2).execute();
+    await beeThreads.run(() => 3).execute();
+    
+    const after = beeThreads.getPoolStats().metrics.totalTasksExecuted;
+    assert.strictEqual(after - before, 3);
+  });
+
+  await test('totalTasksFailed increments on error', async () => {
+    const before = beeThreads.getPoolStats().metrics.totalTasksFailed;
+    
+    try {
+      await beeThreads.run(() => { throw new Error('fail'); }).execute();
+    } catch {}
+    
+    const after = beeThreads.getPoolStats().metrics.totalTasksFailed;
+    assert.strictEqual(after - before, 1);
+  });
+
+  await test('worker stats track execution time', async () => {
+    await beeThreads.shutdown();
+    
+    await beeThreads
+      .run(() => {
+        const start = Date.now();
+        while (Date.now() - start < 50) {}
+        return 'done';
+      })
+      .execute();
+    
+    const stats = beeThreads.getPoolStats();
+    const worker = stats.normal.workers[0];
+    assert.ok(worker, 'Worker should exist in stats');
+    assert.ok(typeof worker.avgExecutionTime === 'number', 
+      'avgExecutionTime should be a number');
+    assert.ok(worker.avgExecutionTime >= 40, 
+      `Expected >= 40ms, got ${worker.avgExecutionTime}ms`);
+  });
+
+  await beeThreads.shutdown();
+
   // ---------- CLEANUP ----------
   section('Cleanup');
 
@@ -779,6 +1249,25 @@ async function runTests() {
     const statsAfter = beeThreads.getPoolStats();
     assert.strictEqual(statsAfter.normal.size, 0);
   });
+
+  await test('shutdown() can be called multiple times safely', async () => {
+    await beeThreads.shutdown();
+    await beeThreads.shutdown();
+    await beeThreads.shutdown();
+    // Should not throw
+  });
+
+  await test('workers recreate after shutdown', async () => {
+    await beeThreads.shutdown();
+    
+    const result = await beeThreads.run(() => 'after shutdown').execute();
+    assert.strictEqual(result, 'after shutdown');
+    
+    const stats = beeThreads.getPoolStats();
+    assert.ok(stats.normal.size > 0, 'Workers should recreate');
+  });
+
+  await beeThreads.shutdown();
 
   // ---------- SUMMARY ----------
   console.log('\n' + '='.repeat(50));

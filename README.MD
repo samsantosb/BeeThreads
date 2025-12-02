@@ -35,6 +35,7 @@ npm install bee-threads
 ✅ **Cancellation** - AbortController support  
 ✅ **Retry** - Automatic retry with exponential backoff  
 ✅ **TypeScript** - Full type definitions included  
+✅ **Console logs** - `console.log` in workers prints to main thread  
 
 ## Quick Start
 
@@ -46,6 +47,15 @@ const result = await beeThreads
   .usingParams(1, 2)
   .execute();
 // → 3
+```
+
+### No Parameters? No Problem
+
+```js
+// usingParams() is optional when function has no arguments
+const result = await beeThreads
+  .run(() => heavyComputation())
+  .execute();
 ```
 
 ### With External Variables
@@ -63,12 +73,23 @@ const result = await beeThreads
 // → 120
 ```
 
+### Console Logs from Workers
+
+```js
+await beeThreads
+  .run(() => {
+    console.log('This prints on main thread!');
+    return 42;
+  })
+  .execute();
+// Output: [worker] This prints on main thread!
+```
+
 ### Safe Mode (Never Throws)
 
 ```js
 const result = await beeThreads
   .safeRun(() => JSON.parse('invalid'))
-  .usingParams()
   .execute();
 
 if (result.status === 'rejected') {
