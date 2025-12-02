@@ -1,17 +1,20 @@
 # 🐝 bee-threads
 
-> Handle threading as promises.
+[![npm version](https://img.shields.io/npm/v/bee-threads.svg)](https://www.npmjs.com/package/bee-threads)
+[![npm downloads](https://img.shields.io/npm/dm/bee-threads.svg)](https://www.npmjs.com/package/bee-threads)
+[![license](https://img.shields.io/npm/l/bee-threads.svg)](https://github.com/samsantosb/BeeThreads/blob/main/LICENSE)
 
-Run CPU-intensive JavaScript in worker threads without blocking the main thread.
+> **Handle threading as promises.**
+
+Run CPU-intensive JavaScript in worker threads without blocking the main thread. Simple, fluent API.
 
 ```js
 const { beeThreads } = require('bee-threads');
 
-// Runs in a separate thread, doesn't block!
 const result = await beeThreads
   .run((data) => {
-    // Heavy computation here
-    return processData(data);
+    // Runs in a separate thread!
+    return heavyComputation(data);
   })
   .usingParams(largeDataset)
   .execute();
@@ -23,9 +26,19 @@ const result = await beeThreads
 npm install bee-threads
 ```
 
-## Usage
+## Features
 
-### Basic
+✅ **Inline functions** - No separate worker files needed  
+✅ **Closure injection** - Use external variables with `.setContext()`  
+✅ **Fluent API** - Chain methods naturally  
+✅ **Generators** - Stream values with `beeThreads.stream()`  
+✅ **Cancellation** - AbortController support  
+✅ **Retry** - Automatic retry with exponential backoff  
+✅ **TypeScript** - Full type definitions included  
+
+## Quick Start
+
+### Basic Usage
 
 ```js
 const result = await beeThreads
@@ -35,9 +48,9 @@ const result = await beeThreads
 // → 3
 ```
 
-### External Variables (Closures)
+### With External Variables
 
-Functions can't capture closures. Use `.setContext()`:
+Functions can't capture closures. Use `.setContext()` to inject them:
 
 ```js
 const TAX_RATE = 0.2;
@@ -50,9 +63,7 @@ const result = await beeThreads
 // → 120
 ```
 
-### Safe Mode
-
-Never throws - returns result object:
+### Safe Mode (Never Throws)
 
 ```js
 const result = await beeThreads
@@ -62,10 +73,12 @@ const result = await beeThreads
 
 if (result.status === 'rejected') {
   console.error(result.error);
+} else {
+  console.log(result.value);
 }
 ```
 
-### Timeout
+### With Timeout
 
 ```js
 await beeThreads
@@ -128,7 +141,9 @@ const result = await beeThreads
 // → 6
 ```
 
-## API
+## API Reference
+
+### Execution Methods
 
 | Method | Description |
 |--------|-------------|
@@ -137,8 +152,10 @@ const result = await beeThreads
 | `withTimeout(ms)(fn)` | With time limit |
 | `stream(genFn)` | Stream generator values |
 
-| Executor Method | Description |
-|-----------------|-------------|
+### Executor Methods
+
+| Method | Description |
+|--------|-------------|
 | `.usingParams(...args)` | Set function arguments |
 | `.setContext(obj)` | Inject closure variables |
 | `.signal(signal)` | Cancellation support |
@@ -146,29 +163,51 @@ const result = await beeThreads
 | `.retry(opts)` | Auto-retry with backoff |
 | `.execute()` | Run the function |
 
-| Config | Description |
+### Configuration
+
+| Method | Description |
 |--------|-------------|
 | `configure(opts)` | Set pool options |
 | `getPoolStats()` | Get metrics |
-| `shutdown()` | Terminate workers |
+| `shutdown()` | Terminate all workers |
 
-## Error Types
+## Error Handling
 
 ```js
 const { AbortError, TimeoutError, QueueFullError, WorkerError } = require('bee-threads');
+
+try {
+  await beeThreads.run(task).usingParams().execute();
+} catch (err) {
+  if (err instanceof TimeoutError) {
+    console.log(`Timed out after ${err.timeout}ms`);
+  }
+}
+```
+
+## Configuration
+
+```js
+beeThreads.configure({
+  poolSize: 8,              // Max workers
+  maxQueueSize: 500,        // Max pending tasks
+  workerIdleTimeout: 60000, // Cleanup idle workers (ms)
+  retry: { maxAttempts: 5 } // Default retry config
+});
 ```
 
 ## Why bee-threads?
 
-
- Inline functions ✅ 
- Closure injection ✅ 
- Fluent API ✅  
- Generators ✅  
- AbortSignal ✅ 
- Auto-retry ✅  
- Curried functions ✅
+| Feature | bee-threads | Piscina | workerpool |
+|---------|:-----------:|:-------:|:----------:|
+| Inline functions | ✅ | ❌ | ❌ |
+| Closure injection | ✅ | ❌ | ❌ |
+| Fluent API | ✅ | ❌ | ❌ |
+| Generators | ✅ | ❌ | ❌ |
+| AbortSignal | ✅ | ❌ | ❌ |
+| Auto-retry | ✅ | ❌ | ❌ |
+| Curried functions | ✅ | ❌ | ❌ |
 
 ## License
 
-MIT
+MIT © [samsantosb](https://github.com/samsantosb)
