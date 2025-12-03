@@ -1,314 +1,209 @@
 # 🐝 bee-threads
 
-[![npm version](https://img.shields.io/npm/v/bee-threads.svg)](https://www.npmjs.com/package/bee-threads)
-[![npm downloads](https://img.shields.io/npm/dm/bee-threads.svg)](https://www.npmjs.com/package/bee-threads)
-[![license](https://img.shields.io/npm/l/bee-threads.svg)](https://github.com/samsantosb/BeeThreads/blob/main/LICENSE)
+[![npm](https://img.shields.io/npm/v/bee-threads.svg)](https://www.npmjs.com/package/bee-threads)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg)](https://www.typescriptlang.org/)
 
-> Run sync code in worker threads with a simple await.
-
-```js
-const { beeThreads } = require('bee-threads');
-
-const hash = await beeThreads
-  .run((pwd) => require('crypto').pbkdf2Sync(pwd, 'salt', 100000, 64, 'sha512').toString('hex'))
-  .usingParams('password')
-  .execute();
-```
-
-**Short syntax:**
-
-```js
-const { bee } = require('bee-threads');
-
-const hash = await bee(
-  (pwd) => require('crypto').pbkdf2Sync(pwd, 'salt', 100000, 64, 'sha512').toString('hex')
-)('password');
-```
-
-## Install
+> Worker threads with zero boilerplate. Zero dependencies.
 
 ```bash
 npm install bee-threads
 ```
 
----
-
-## `bee` — Short Syntax
+## Quick Start
 
 ```js
-// no params (always requires empty call)
-await bee(() => 42)()
+const { bee } = require('bee-threads');
 
-// with params
-await bee((a, b, c) => a + b + c)(1, 2, 3)
+// Any function runs in a separate thread
+const hash = await bee((pwd) => 
+  require('crypto').pbkdf2Sync(pwd, 'salt', 100000, 64, 'sha512').toString('hex')
+)('password123');
+```
 
-// supports curried callbacks!
-await bee((a) => (b) => a + b)(1)(2)
-// → 3
+---
 
-// with external variables
+## Basic Usage
+
+```js
+// Simple
+await bee(() => 42)();
+
+// With arguments
+await bee((a, b) => a + b)(10, 20);  // → 30
+
+// External variables (closures)
 const TAX = 0.2;
-await bee((price) => price * (1 + TAX))(100)({ beeClosures: { TAX } })
+await bee((price) => price * (1 + TAX))(100)({ beeClosures: { TAX } });  // → 120
 ```
 
 ---
 
-## `beeThreads` — Full API
+## Full API
 
-### `.usingParams(...args)` — Pass arguments
-
-```js
-const sum = await beeThreads
-  .run((a, b, c) => a + b + c)
-  .usingParams(10, 20, 30)
-  .execute();
-// → 60
-```
-
-### `.setContext(obj)` — Inject external variables
+For more control, use `beeThreads`:
 
 ```js
-const TAX_RATE = 0.2;
-const DISCOUNT = 0.1;
+const { beeThreads } = require('bee-threads');
 
-const finalPrice = await beeThreads
-  .run((price) => price * (1 + TAX_RATE) * (1 - DISCOUNT))
-  .usingParams(100)
-  .setContext({ TAX_RATE, DISCOUNT })
-  .execute();
-// → 108
-```
-
-### `.signal(AbortSignal)` — Cancellation
-
-```js
-const controller = new AbortController();
-
-// Cancel after 1 second
-setTimeout(() => controller.abort(), 1000);
-
-try {
-  await beeThreads
-    .run(() => { while(true) {} }) // infinite loop
-    .signal(controller.signal)
-    .execute();
-} catch (err) {
-  console.log(err.name); // 'AbortError'
-}
-```
-
-### `.transfer([ArrayBuffer])` — Zero-copy transfer
-
-```js
-const buffer = new ArrayBuffer(1024 * 1024); // 1MB
-
-const result = await beeThreads
-  .run((buf) => {
-    const view = new Uint8Array(buf);
-    view.fill(42);
-    return buf;
-  })
-  .usingParams(buffer)
-  .transfer([buffer]) // zero-copy, buffer is moved not copied
-  .execute();
-```
-
-### `.retry({ attempts })` — Auto-retry
-
-```js
-const result = await beeThreads
-  .run(() => {
-    if (Math.random() < 0.5) throw new Error('Transient failure');
-    return 'success';
-  })
-  .retry({ 
-    attempts: 3,      // max retries
-    delay: 100,       // initial delay ms
-    backoff: 2        // exponential backoff multiplier
-  })
-  .execute();
-```
-
-### `.priority('high'|'normal'|'low')` — Queue priority
-
-```js
-// Critical task - jumps to front of queue
 await beeThreads
-  .run(processPayment)
-  .usingParams(paymentData)
-  .priority('high')
-  .execute();
-
-// Background task - processed last
-await beeThreads
-  .run(generateReport)
-  .usingParams(reportData)
-  .priority('low')
-  .execute();
+  .run((x) => x * 2)
+  .usingParams(21)
+  .execute();  // → 42
 ```
 
----
+### `.usingParams(...args)`
+Pass arguments to the function:
+```js
+await beeThreads.run((a, b) => a + b).usingParams(10, 20).execute();  // → 30
+```
 
-## Timeout
+### `.setContext({ vars })`
+Inject external variables (closures):
+```js
+const TAX = 0.2;
+await beeThreads.run((p) => p * (1 + TAX)).usingParams(100).setContext({ TAX }).execute();  // → 120
+```
 
-### `beeThreads.withTimeout(ms)(fn)` — Execution with timeout
+### `.signal(AbortSignal)`
+Enable cancellation:
+```js
+const ctrl = new AbortController();
+setTimeout(() => ctrl.abort(), 1000);
+await beeThreads.run(() => longTask()).signal(ctrl.signal).execute();
+```
+
+### `.retry(options)`
+Auto-retry on failure:
+```js
+await beeThreads.run(() => unstableApi()).retry({ maxAttempts: 3, baseDelay: 100 }).execute();
+```
+
+### `.priority(level)`
+Queue priority (`'high'` | `'normal'` | `'low'`):
+```js
+await beeThreads.run(() => critical()).priority('high').execute();
+```
+
+### `.transfer([ArrayBuffer])`
+Zero-copy for large binary data:
+```js
+const buf = new ArrayBuffer(1024);
+await beeThreads.run((b) => process(b)).usingParams(buf).transfer([buf]).execute();
+```
+
+### Timeout
 
 ```js
-try {
-  await beeThreads
-    .withTimeout(5000)((data) => heavyComputation(data))
-    .usingParams(largeDataset)
-    .execute();
-} catch (err) {
-  console.log(err.name); // 'TimeoutError'
-}
+await beeThreads
+  .withTimeout(5000)((data) => process(data))
+  .usingParams(data)
+  .execute();
 ```
 
-### `beeThreads.stream(generatorFn)` — Async iterator
+### Streaming (Generators)
 
 ```js
 const stream = beeThreads
-  .stream(function* (start, end) {
-    for (let i = start; i <= end; i++) {
-      yield i * i; // yields squares
-    }
+  .stream(function* (n) {
+    for (let i = 1; i <= n; i++) yield i * i;
   })
-  .usingParams(1, 5)
+  .usingParams(5)
   .execute();
 
-for await (const square of stream) {
-  console.log(square);
+for await (const value of stream) {
+  console.log(value);  // 1, 4, 9, 16, 25
 }
-// → 1, 4, 9, 16, 25
+```
+
+---
+
+## Configuration
+
+```js
+beeThreads.configure({
+  poolSize: 8,              // Max workers (default: CPU cores)
+  minThreads: 2,            // Pre-warmed workers
+  maxQueueSize: 1000,       // Max pending tasks
+  workerIdleTimeout: 30000, // Cleanup idle workers (ms)
+  debugMode: true,          // Show function source in errors
+  logger: console,          // Custom logger (or null to disable)
+  lowMemoryMode: false,     // Reduce memory (~60-80% less)
+});
+
+// Pre-warm workers
+await beeThreads.warmup(4);
+
+// Metrics
+const stats = beeThreads.getPoolStats();
+
+// Shutdown
+await beeThreads.shutdown();
+```
+
+---
+
+## Error Handling
+
+```js
+const { TimeoutError, AbortError, QueueFullError, WorkerError } = require('bee-threads');
+
+try {
+  await beeThreads.run(fn).execute();
+} catch (err) {
+  if (err instanceof TimeoutError) { /* timeout */ }
+  if (err instanceof AbortError) { /* cancelled */ }
+  if (err instanceof QueueFullError) { /* queue full */ }
+  if (err instanceof WorkerError) { /* worker error */ }
+}
 ```
 
 ---
 
 ## Parallel Execution
 
-Use native `Promise.all()` for parallel tasks:
-
 ```js
 const [a, b, c] = await Promise.all([
-  bee(x => x * 2)(21),
-  bee((a, b) => a + b)(10, 20),
+  bee((x) => x * 2)(21),
+  bee((x) => x + 1)(41),
   bee(() => 'hello')()
 ]);
-// a = 42, b = 30, c = 'hello'
-```
-
-Or with `beeThreads`:
-
-```js
-const double = beeThreads.run(x => x * 2);
-
-const [a, b, c] = await Promise.all([
-  double.usingParams(10).execute(),
-  double.usingParams(20).execute(),
-  double.usingParams(30).execute()
-]);
-// a = 20, b = 40, c = 60
+// [42, 42, 'hello']
 ```
 
 ---
 
-## Pool
+## TypeScript
 
-```js
-// Configure pool
-beeThreads.configure({ 
-  poolSize: 8,           // max workers
-  minThreads: 2,         // always-ready workers
-  maxQueueSize: 100,     // max pending tasks
-  workerIdleTimeout: 60000 // cleanup idle workers after 60s
-});
+Full type support:
 
-// Pre-warm workers (eliminates cold-start)
-await beeThreads.warmup(4);
+```ts
+import { bee, beeThreads } from 'bee-threads';
 
-// Get metrics
-const stats = beeThreads.getPoolStats();
-console.log(stats.normal.busy);  // workers currently busy
-console.log(stats.normal.idle);  // workers available
-
-// Graceful shutdown
-await beeThreads.shutdown();
-```
-
----
-
-## Low Memory Mode
-
-For IoT devices, serverless functions, or memory-constrained environments:
-
-```js
-beeThreads.configure({
-  lowMemoryMode: true  // ~60-80% less memory usage
-});
-```
-
-**What it disables:**
-- Function validation cache
-- Worker affinity tracking
-- Reduces function cache to 10 entries (default: 100)
-
-**Trade-off:** Slower repeated executions (no caching benefits), but significantly lower memory footprint.
-
----
-
-## Errors
-
-```js
-const { TimeoutError, AbortError, QueueFullError, WorkerError } = require('bee-threads');
-
-// TimeoutError - task exceeded timeout
-// AbortError - task was cancelled via AbortSignal
-// QueueFullError - queue at maxQueueSize capacity
-// WorkerError - worker crashed or threw error
+const result = await bee((x: number) => x * 2)(21);  // number
 ```
 
 ---
 
 ## Use Cases
 
-1. **Password Hashing** — PBKDF2, bcrypt, scrypt
-2. **Image Processing** — resize, compress, filters (sharp, jimp)
-3. **Large JSON Parsing** — 50MB+ JSON files
-4. **Data Compression** — gzip, brotli, zstd
-5. **Complex Regex** — pattern matching on large text
-6. **PDF Generation** — multi-page documents
-7. **Batch Validation** — validate thousands of records
-8. **Heavy Loops** — millions of iterations, Monte Carlo simulations
+- Password hashing (PBKDF2, bcrypt)
+- Image processing (sharp, jimp)
+- Large JSON parsing
+- Data compression
+- PDF generation
+- Heavy computations
 
 ---
 
 ## Why bee-threads?
 
-**Developer Experience:**
+- **Zero dependencies** - Lightweight and secure
+- **Inline functions** - No separate worker files
+- **Worker pool** - Reuses threads, no cold-start
+- **Function caching** - LRU cache, VM.Script optimization
+- **Worker affinity** - Same function → same worker (V8 JIT)
+- **Full TypeScript** - Complete type definitions
 
-- **Inline functions** — no separate worker files
-- **Simple syntax** — `await bee(fn)(args)` 
-- **Closure support** — pass external variables with `beeClosures`
-- **Full TypeScript** — complete type definitions
-- **Zero config** — works out of the box
+---
 
-**Performance:**
-
-- **Worker pool** — reuses threads, no cold-start
-- **Load balancing** — distributes tasks across workers
-- **Worker affinity** — routes same function to same worker (V8 JIT optimization)
-- **vm.Script** — 5-15x faster than `eval()` for function compilation
-- **Function caching** — LRU cache avoids recompilation
-- **Priority queue** — critical tasks first
-- **Auto-retry** — handles transient failures
-- **Low memory mode** — for IoT/serverless environments
-
-**Production Ready:**
-
-- **Non-blocking shutdown** — `worker.unref()` doesn't hold process
-- **Console forwarding** — logs from workers appear in main thread
-- **Graceful degradation** — queue overflow handling
-
-## License
-
-MIT
+MIT © [Samuel Santos](https://github.com/samsantosb)

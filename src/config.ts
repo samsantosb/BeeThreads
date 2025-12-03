@@ -109,7 +109,24 @@ export const config: PoolConfig = {
     baseDelay: 100,
     maxDelay: 5000,
     backoffFactor: 2
-  }
+  },
+
+  /**
+   * Debug mode for development.
+   * Auto-enabled when NODE_ENV !== 'production'.
+   *
+   * When enabled:
+   * - Function source code included in error messages
+   * - More verbose error logging in workers
+   */
+  debugMode: process.env.NODE_ENV !== 'production',
+
+  /**
+   * Logger for worker log forwarding.
+   * Default: console
+   * Set to null to disable logging.
+   */
+  logger: console as PoolConfig['logger']
 };
 
 // ============================================================================

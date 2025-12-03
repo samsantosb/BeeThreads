@@ -97,13 +97,19 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
      * Enables automatic retry with exponential backoff.
      */
     retry(retryOptions: RetryOptions = {}): Executor<T> {
+      const mergedRetry = {
+        enabled: true,
+        maxAttempts: retryOptions.maxAttempts ?? config.retry.maxAttempts,
+        baseDelay: retryOptions.baseDelay ?? config.retry.baseDelay,
+        maxDelay: retryOptions.maxDelay ?? config.retry.maxDelay,
+        backoffFactor: retryOptions.backoffFactor ?? config.retry.backoffFactor,
+      };
       return createExecutor<T>({
         fnString,
         options: {
           ...options,
-          // @ts-ignore - mixing retry options
-          retry: { enabled: true, ...config.retry, ...retryOptions }
-        },
+          retry: mergedRetry
+        } as ExecutionOptions & { retry: typeof mergedRetry },
         args
       });
     },

@@ -56,12 +56,13 @@ export function createWorkerEntry(script: string, poolType: PoolType): WorkerEnt
   const cacheSize = config.lowMemoryMode ? 10 : config.functionCacheSize;
 
   const workerOptions: {
-    workerData: { functionCacheSize: number; lowMemoryMode: boolean };
+    workerData: { functionCacheSize: number; lowMemoryMode: boolean; debugMode: boolean };
     resourceLimits?: typeof config.resourceLimits;
   } = {
     workerData: {
       functionCacheSize: cacheSize,
-      lowMemoryMode: config.lowMemoryMode
+      lowMemoryMode: config.lowMemoryMode,
+      debugMode: config.debugMode
     }
   };
 
@@ -211,10 +212,14 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
   // Strategy 4: Create temporary worker
   if (metrics.activeTemporaryWorkers < config.maxTemporaryWorkers) {
     const workerOptions: {
-      workerData: { functionCacheSize: number };
+      workerData: { functionCacheSize: number; lowMemoryMode: boolean; debugMode: boolean };
       resourceLimits?: typeof config.resourceLimits;
     } = {
-      workerData: { functionCacheSize: config.functionCacheSize }
+      workerData: { 
+        functionCacheSize: config.functionCacheSize,
+        lowMemoryMode: config.lowMemoryMode,
+        debugMode: config.debugMode
+      }
     };
     if (config.resourceLimits) {
       workerOptions.resourceLimits = config.resourceLimits;

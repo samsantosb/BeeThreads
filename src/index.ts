@@ -26,7 +26,8 @@ import {
   WorkerError
 } from './errors';
 import { execute } from './execution';
-import type { ConfigureOptions, FullPoolStats, PoolType, Priority } from './types';
+import { noopLogger } from './types';
+import type { ConfigureOptions, FullPoolStats, PoolType, Priority, Logger } from './types';
 
 // ============================================================================
 // SIMPLE CURRIED API
@@ -205,6 +206,21 @@ export const beeThreads = {
       }
       config.lowMemoryMode = options.lowMemoryMode;
     }
+    if (options.debugMode !== undefined) {
+      if (typeof options.debugMode !== 'boolean') {
+        throw new TypeError('debugMode must be a boolean');
+      }
+      config.debugMode = options.debugMode;
+    }
+    if (options.logger !== undefined) {
+      // null = disable logging, otherwise must have log methods
+      if (options.logger !== null) {
+        if (typeof options.logger !== 'object' || typeof options.logger.log !== 'function') {
+          throw new TypeError('logger must be an object with log/warn/error/info/debug methods, or null to disable');
+        }
+      }
+      config.logger = options.logger;
+    }
   },
 
   /**
@@ -253,6 +269,31 @@ export const beeThreads = {
     }));
 
     metrics.activeTemporaryWorkers = 0;
+  },
+
+  /**
+   * Symbol.dispose for automatic cleanup with `using` keyword (ES2024).
+   * @example
+   * {
+   *   using pool = beeThreads;
+   *   await pool.run(() => 42).execute();
+   * } // auto-shutdown here
+   */
+  [Symbol.dispose](): void {
+    // Fire-and-forget shutdown
+    this.shutdown().catch(() => {});
+  },
+
+  /**
+   * Symbol.asyncDispose for async cleanup with `await using` keyword.
+   * @example
+   * {
+   *   await using pool = beeThreads;
+   *   await pool.run(() => 42).execute();
+   * } // awaits shutdown here
+   */
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.shutdown();
   },
 
   /**
@@ -349,7 +390,8 @@ export {
   AbortError,
   TimeoutError,
   QueueFullError,
-  WorkerError
+  WorkerError,
+  noopLogger
 };
 
 // Re-export types
@@ -359,7 +401,8 @@ export type {
   ConfigureOptions,
   FullPoolStats,
   Priority,
-  PoolType
+  PoolType,
+  Logger
 };
 
 // Default export for convenience

@@ -1,26 +1,28 @@
-// test.js - bee-threads test suite
-const assert = require('assert');
-const { bee, beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError } = require('./dist/index.js');
-const { createLRUCache, createFunctionCache } = require('./dist/cache.js');
+// test.ts - bee-threads test suite v1.0.0
+import * as assert from 'assert';
+import { bee, beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError, noopLogger } from './dist/index.js';
+import { createLRUCache, createFunctionCache } from './dist/cache.js';
+import type { Logger } from './dist/types.js';
 
 // Test utilities
 let passed = 0;
 let failed = 0;
 
-async function test(name, fn) {
+async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
   try {
     await fn();
     console.log(`  ✅ ${name}`);
     passed++;
-  } catch (err) {
+  } catch (err: unknown) {
+    const error = err as Error;
     console.log(`  ❌ ${name}`);
-    console.log(`     ${err.message}`);
-    if (err.stack) console.log(`     ${err.stack.split('\n')[1]}`);
+    console.log(`     ${error.message}`);
+    if (error.stack) console.log(`     ${error.stack.split('\n')[1]}`);
     failed++;
   }
 }
 
-function section(name) {
+function section(name: string): void {
   console.log(`\n📦 ${name}`);
 }
 
@@ -28,7 +30,7 @@ function section(name) {
 // TESTS
 // ============================================================================
 
-async function runTests() {
+async function runTests(): Promise<void> {
   console.log('\n🧪 bee-threads Test Suite\n');
   console.log('='.repeat(50));
 
@@ -41,18 +43,18 @@ async function runTests() {
   });
 
   await test('bee(fn)(arg) executes with single argument', async () => {
-    const result = await bee(x => x * 2)(21);
+    const result = await bee((x: number) => x * 2)(21);
     assert.strictEqual(result, 42);
   });
 
   await test('bee(fn)(a, b, c) executes with multiple arguments', async () => {
-    const result = await bee((a, b, c) => a + b + c)(1, 2, 3);
+    const result = await bee((a: number, b: number, c: number) => a + b + c)(1, 2, 3);
     assert.strictEqual(result, 6);
   });
 
   await test('bee(fn)(arg)({ beeClosures }) injects context', async () => {
     const TAX = 0.2;
-    const result = await bee(p => p * (1 + TAX))(100)({ beeClosures: { TAX } });
+    const result = await bee((p: number) => p * (1 + TAX))(100)({ beeClosures: { TAX } });
     assert.strictEqual(result, 120);
   });
 
@@ -63,31 +65,31 @@ async function runTests() {
   });
 
   await test('bee(fn)(a)(b)(c) curries multiple calls', async () => {
-    const result = await bee((a, b, c) => a + b + c)(1)(2)(3);
+    const result = await bee((a: number, b: number, c: number) => a + b + c)(1)(2)(3);
     assert.strictEqual(result, 6);
   });
 
   await test('bee(fn)(a)(b)({ beeClosures }) curries with closures', async () => {
-    const MULT = 10;
-    const result = await bee((a, b) => (a + b) * MULT)(2)(3)({ beeClosures: { MULT } });
+    const CURRY_MULT = 10;
+    const result = await bee((a: number, b: number) => (a + b) * CURRY_MULT)(2)(3)({ beeClosures: { CURRY_MULT } });
     assert.strictEqual(result, 50);
   });
 
   await test('bee() throws TypeError for non-function', () => {
-    assert.throws(() => bee('not a function'), TypeError);
-    assert.throws(() => bee(123), TypeError);
-    assert.throws(() => bee(null), TypeError);
+    assert.throws(() => bee('not a function' as any), TypeError);
+    assert.throws(() => bee(123 as any), TypeError);
+    assert.throws(() => bee(null as any), TypeError);
   });
 
   await test('bee(fn)(arg) handles async functions', async () => {
-    const result = await bee(async (x) => {
+    const result = await bee(async (x: number) => {
       return x * 2;
     })(21);
     assert.strictEqual(result, 42);
   });
 
   await test('bee(fn)(n) handles complex computation', async () => {
-    const result = await bee((n) => {
+    const result = await bee((n: number) => {
       let sum = 0;
       for (let i = 0; i < n; i++) sum += i;
       return sum;
@@ -96,7 +98,7 @@ async function runTests() {
   });
 
   await test('bee() hash password example', async () => {
-    const hash = await bee((pwd) => {
+    const hash = await bee((pwd: string) => {
       const crypto = require('crypto');
       return crypto.pbkdf2Sync(pwd, 'salt', 1000, 64, 'sha512').toString('hex');
     })('password123');
@@ -107,13 +109,13 @@ async function runTests() {
   await test('bee(fn)(args) with multiple beeClosures values', async () => {
     const A = 10;
     const B = 5;
-    const result = await bee((x) => x * A + B)(2)({ beeClosures: { A, B } });
+    const result = await bee((x: number) => x * A + B)(2)({ beeClosures: { A, B } });
     assert.strictEqual(result, 25);
   });
 
   await test('bee(fn) with nested object in beeClosures', async () => {
     const config = { multiplier: 3, offset: 7 };
-    const result = await bee((x) => x * config.multiplier + config.offset)(10)({ beeClosures: { config } });
+    const result = await bee((x: number) => x * config.multiplier + config.offset)(10)({ beeClosures: { config } });
     assert.strictEqual(result, 37);
   });
 
@@ -124,7 +126,7 @@ async function runTests() {
   });
 
   await test('bee(fn)(a)(b)(c)(d) deep curry chain', async () => {
-    const result = await bee((a, b, c, d) => a * b + c * d)(2)(3)(4)(5);
+    const result = await bee((a: number, b: number, c: number, d: number) => a * b + c * d)(2)(3)(4)(5);
     assert.strictEqual(result, 26);
   });
 
@@ -148,7 +150,7 @@ async function runTests() {
 
   await test('bee(fn) with beeClosures containing function as string', async () => {
     const helperCode = '(x) => x * 2';
-    const result = await bee((n) => {
+    const result = await bee((n: number) => {
       const helper = eval(helperCode);
       return helper(n);
     })(21)({ beeClosures: { helperCode } });
@@ -157,10 +159,10 @@ async function runTests() {
 
   await test('bee(fn) parallel execution', async () => {
     const results = await Promise.all([
-      bee((x) => x * 1)(10),
-      bee((x) => x * 2)(10),
-      bee((x) => x * 3)(10),
-      bee((x) => x * 4)(10),
+      bee((x: number) => x * 1)(10),
+      bee((x: number) => x * 2)(10),
+      bee((x: number) => x * 3)(10),
+      bee((x: number) => x * 4)(10),
     ]);
     assert.deepStrictEqual(results, [10, 20, 30, 40]);
   });
@@ -169,8 +171,9 @@ async function runTests() {
     try {
       await bee(() => { throw new Error('test error'); })();
       assert.fail('Should have thrown');
-    } catch (err) {
-      assert.ok(err.message.includes('test error'));
+    } catch (err: unknown) {
+      const error = err as Error;
+      assert.ok(error.message.includes('test error'));
     }
   });
 
@@ -185,17 +188,17 @@ async function runTests() {
   });
 
   await test('bee(fn) mixed curry with spread args', async () => {
-    const result = await bee((a, b, c, d) => a + b + c + d)(1, 2)(3, 4);
+    const result = await bee((a: number, b: number, c: number, d: number) => a + b + c + d)(1, 2)(3, 4);
     assert.strictEqual(result, 10);
   });
 
   await test('bee(fn) supports curried callback function', async () => {
-    const result = await bee((a) => (b) => a + b)(1)(2);
+    const result = await bee((a: number) => (b: number) => a + b)(1)(2);
     assert.strictEqual(result, 3);
   });
 
   await test('bee(fn) supports deeply curried callback', async () => {
-    const result = await bee((a) => (b) => (c) => a + b + c)(1)(2)(3);
+    const result = await bee((a: number) => (b: number) => (c: number) => a + b + c)(1)(2)(3);
     assert.strictEqual(result, 6);
   });
 
@@ -204,7 +207,7 @@ async function runTests() {
 
   await test('executes sync function and returns result', async () => {
     const result = await beeThreads
-      .run((a, b) => a + b)
+      .run((a: number, b: number) => a + b)
       .usingParams(2, 3)
       .execute();
     assert.strictEqual(result, 5);
@@ -212,7 +215,7 @@ async function runTests() {
 
   await test('handles complex computation', async () => {
     const result = await beeThreads
-      .run((n) => {
+      .run((n: number) => {
         let sum = 0;
         for (let i = 0; i < n; i++) sum += i;
         return sum;
@@ -247,14 +250,15 @@ async function runTests() {
         .usingParams()
         .execute();
       assert.fail('Should have thrown');
-    } catch (err) {
-      assert.strictEqual(err.name, 'TypeError');
+    } catch (err: unknown) {
+      const error = err as Error;
+      assert.strictEqual(error.name, 'TypeError');
     }
   });
 
   await test('passes multiple arguments correctly', async () => {
     const result = await beeThreads
-      .run((a, b, c, d) => a * b + c - d)
+      .run((a: number, b: number, c: number, d: number) => a * b + c - d)
       .usingParams(2, 3, 10, 4)
       .execute();
     assert.strictEqual(result, 12);
@@ -262,7 +266,7 @@ async function runTests() {
 
   await test('handles arrow functions', async () => {
     const result = await beeThreads
-      .run((x) => x * 2)
+      .run((x: number) => x * 2)
       .usingParams(21)
       .execute();
     assert.strictEqual(result, 42);
@@ -270,7 +274,7 @@ async function runTests() {
 
   await test('handles async arrow functions', async () => {
     const result = await beeThreads
-      .run(async (x) => {
+      .run(async (x: number) => {
         await new Promise(r => setTimeout(r, 10));
         return x * 2;
       })
@@ -281,7 +285,7 @@ async function runTests() {
 
   await test('handles curried functions automatically', async () => {
     const result = await beeThreads
-      .run((a) => (b) => (c) => a + b + c)
+      .run((a: number) => (b: number) => (c: number) => a + b + c)
       .usingParams(1, 2, 3)
       .execute();
     assert.strictEqual(result, 6);
@@ -292,7 +296,7 @@ async function runTests() {
 
   await test('completes before timeout', async () => {
     const result = await beeThreads
-      .withTimeout(5000)((x) => x + 1)
+      .withTimeout(5000)((x: number) => x + 1)
       .usingParams(41)
       .execute();
     assert.strictEqual(result, 42);
@@ -327,16 +331,16 @@ async function runTests() {
       .usingParams()
       .execute();
 
-    const chunks = [];
+    const chunks: number[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk);
+      chunks.push(chunk as number);
     }
     assert.deepStrictEqual(chunks, [1, 2, 3]);
   });
 
   await test('streams with arguments', async () => {
     const stream = beeThreads
-      .stream(function* (start, count) {
+      .stream(function* (start: number, count: number) {
         for (let i = 0; i < count; i++) {
           yield start + i;
         }
@@ -344,9 +348,9 @@ async function runTests() {
       .usingParams(10, 3)
       .execute();
 
-    const chunks = [];
+    const chunks: number[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk);
+      chunks.push(chunk as number);
     }
     assert.deepStrictEqual(chunks, [10, 11, 12]);
   });
@@ -360,9 +364,9 @@ async function runTests() {
       .usingParams()
       .execute();
 
-    const chunks = [];
+    const chunks: number[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk);
+      chunks.push(chunk as number);
     }
     assert.deepStrictEqual(chunks, [1, 2]);
   });
@@ -377,9 +381,9 @@ async function runTests() {
       .usingParams()
       .execute();
 
-    const chunks = [];
+    const chunks: number[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk);
+      chunks.push(chunk as number);
     }
     assert.deepStrictEqual(chunks, [1, 2]);
     assert.strictEqual(stream.returnValue, 'final');
@@ -392,14 +396,14 @@ async function runTests() {
 
   await test('run() throws TypeError for non-function', () => {
     assert.throws(
-      () => beeThreads.run('not a function'),
+      () => beeThreads.run('not a function' as any),
       TypeError
     );
   });
 
   await test('run() throws TypeError for null', () => {
     assert.throws(
-      () => beeThreads.run(null),
+      () => beeThreads.run(null as any),
       TypeError
     );
   });
@@ -413,7 +417,7 @@ async function runTests() {
 
   await test('withTimeout() throws for non-number', () => {
     assert.throws(
-      () => beeThreads.withTimeout('100'),
+      () => beeThreads.withTimeout('100' as any),
       TypeError
     );
   });
@@ -441,7 +445,7 @@ async function runTests() {
 
   await test('stream() throws TypeError for non-function', () => {
     assert.throws(
-      () => beeThreads.stream('not a generator'),
+      () => beeThreads.stream('not a generator' as any),
       TypeError
     );
   });
@@ -450,7 +454,7 @@ async function runTests() {
   section('Pool Management');
 
   await test('getPoolStats() returns valid stats', async () => {
-    await beeThreads.run((x) => x).usingParams(1).execute();
+    await beeThreads.run((x: number) => x).usingParams(1).execute();
     const stats = beeThreads.getPoolStats();
     assert.ok(typeof stats.maxSize === 'number');
     assert.ok(typeof stats.normal.size === 'number');
@@ -482,17 +486,17 @@ async function runTests() {
     
     assert.throws(() => {
       'use strict';
-      stats.maxSize = 999;
+      (stats as any).maxSize = 999;
     }, TypeError);
   });
 
   await test('transfer() method exists on executor', () => {
-    const exec = beeThreads.run((x) => x);
+    const exec = beeThreads.run((x: number) => x);
     assert.ok(typeof exec.transfer === 'function', 'transfer method should exist');
   });
 
   await test('signal() method exists on executor', () => {
-    const exec = beeThreads.run((x) => x);
+    const exec = beeThreads.run((x: number) => x);
     assert.ok(typeof exec.signal === 'function', 'signal method should exist');
   });
 
@@ -500,7 +504,7 @@ async function runTests() {
   section('Curried API');
 
   await test('executor can be reused multiple times', async () => {
-    const double = beeThreads.run((x) => x * 2);
+    const double = beeThreads.run((x: number) => x * 2);
     
     const r1 = await double.usingParams(5).execute();
     const r2 = await double.usingParams(10).execute();
@@ -512,8 +516,8 @@ async function runTests() {
   });
 
   await test('multiple executors work independently', async () => {
-    const add = beeThreads.run((a, b) => a + b);
-    const mul = beeThreads.run((a, b) => a * b);
+    const add = beeThreads.run((a: number, b: number) => a + b);
+    const mul = beeThreads.run((a: number, b: number) => a * b);
     
     const sum = await add.usingParams(10, 5).execute();
     const product = await mul.usingParams(10, 5).execute();
@@ -613,7 +617,7 @@ async function runTests() {
     const controller = new AbortController();
     
     const exec = beeThreads
-      .run((x) => x * 2)
+      .run((x: number) => x * 2)
       .signal(controller.signal)
       .retry({ maxAttempts: 2 })
       .usingParams(21);
@@ -646,9 +650,9 @@ async function runTests() {
         .usingParams()
         .execute();
       assert.fail('Should have thrown');
-    } catch (err) {
+    } catch (err: unknown) {
       assert.ok(err instanceof WorkerError);
-      assert.strictEqual(err.name, 'RangeError');
+      assert.strictEqual((err as Error).name, 'RangeError');
     }
   });
 
@@ -656,15 +660,13 @@ async function runTests() {
   section('Retry Support');
 
   await test('retry() method exists on executor', () => {
-    const exec = beeThreads.run((x) => x);
+    const exec = beeThreads.run((x: number) => x);
     assert.ok(typeof exec.retry === 'function', 'retry method should exist');
   });
 
-  let retryAttempt = 0;
   await test('retry succeeds on transient failure simulation', async () => {
-    retryAttempt = 0;
     const result = await beeThreads
-      .run((attempt) => {
+      .run((attempt: number) => {
         if (attempt < 2) {
           throw new Error('transient');
         }
@@ -697,7 +699,7 @@ async function runTests() {
   await beeThreads.shutdown();
 
   await test('setContext() method exists on executor', () => {
-    const exec = beeThreads.run((x) => x);
+    const exec = beeThreads.run((x: number) => x);
     assert.ok(typeof exec.setContext === 'function', 'setContext method should exist');
   });
 
@@ -706,7 +708,7 @@ async function runTests() {
     const prefix = 'result:';
     
     const result = await beeThreads
-      .run((x) => prefix + (x * factor))
+      .run((x: number) => prefix + (x * factor))
       .usingParams(5)
       .setContext({ factor, prefix })
       .execute();
@@ -719,7 +721,7 @@ async function runTests() {
     const label = 'value';
     
     const result = await beeThreads
-      .run((x) => ({ [label]: x * config.multiplier + config.offset }))
+      .run((x: number) => ({ [label]: x * config.multiplier + config.offset }))
       .usingParams(10)
       .setContext({ config, label })
       .execute();
@@ -731,7 +733,7 @@ async function runTests() {
     const multiplier = 2;
     
     const stream = beeThreads
-      .stream(function* (n) {
+      .stream(function* (n: number) {
         for (let i = 1; i <= n; i++) {
           yield i * multiplier;
         }
@@ -740,9 +742,9 @@ async function runTests() {
       .setContext({ multiplier })
       .execute();
     
-    const chunks = [];
+    const chunks: number[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk);
+      chunks.push(chunk as number);
     }
     
     assert.deepStrictEqual(chunks, [2, 4, 6]);
@@ -754,13 +756,13 @@ async function runTests() {
   section('usingParams() - Arguments');
 
   await test('usingParams() method exists on executor', () => {
-    const exec = beeThreads.run((x) => x);
+    const exec = beeThreads.run((x: number) => x);
     assert.ok(typeof exec.usingParams === 'function', 'usingParams method should exist');
   });
 
   await test('usingParams() passes arguments correctly', async () => {
     const result = await beeThreads
-      .run((a, b, c) => a + b + c)
+      .run((a: number, b: number, c: number) => a + b + c)
       .usingParams(10, 20, 12)
       .execute();
     
@@ -769,7 +771,7 @@ async function runTests() {
 
   await test('usingParams() can be chained', async () => {
     const result = await beeThreads
-      .run((a, b, c, d) => a + b + c + d)
+      .run((a: number, b: number, c: number, d: number) => a + b + c + d)
       .usingParams(1)
       .usingParams(2)
       .usingParams(3, 4)
@@ -782,7 +784,7 @@ async function runTests() {
     const factor = 2;
     
     const result = await beeThreads
-      .run((a, b) => (a + b) * factor)
+      .run((a: number, b: number) => (a + b) * factor)
       .usingParams(10, 20)
       .setContext({ factor })
       .execute();
@@ -882,9 +884,9 @@ async function runTests() {
       })
       .execute();
 
-    const chunks = [];
+    const chunks: string[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk);
+      chunks.push(chunk as string);
     }
     assert.deepStrictEqual(chunks, ['a', 'b']);
   });
@@ -945,14 +947,14 @@ async function runTests() {
 
   await test('setContext() throws TypeError for null', () => {
     assert.throws(
-      () => beeThreads.run((x) => x).setContext(null),
+      () => beeThreads.run((x: number) => x).setContext(null as any),
       TypeError
     );
   });
 
   await test('setContext() throws TypeError for non-object', () => {
     assert.throws(
-      () => beeThreads.run((x) => x).setContext('not an object'),
+      () => beeThreads.run((x: number) => x).setContext('not an object' as any),
       TypeError
     );
   });
@@ -984,7 +986,7 @@ async function runTests() {
     view[1] = 123;
 
     const result = await beeThreads
-      .run((buf) => {
+      .run((buf: ArrayBuffer) => {
         const arr = new Uint8Array(buf);
         return arr[0] + arr[1];
       })
@@ -1005,7 +1007,7 @@ async function runTests() {
     view[size - 1] = 2;
 
     const result = await beeThreads
-      .run((buf) => {
+      .run((buf: ArrayBuffer) => {
         const arr = new Uint8Array(buf);
         return arr[0] + arr[arr.length - 1];
       })
@@ -1023,7 +1025,7 @@ async function runTests() {
     view[1] = 20;
 
     const stream = beeThreads
-      .stream(function* (buf) {
+      .stream(function* (buf: ArrayBuffer) {
         const arr = new Uint8Array(buf);
         yield arr[0];
         yield arr[1];
@@ -1032,9 +1034,9 @@ async function runTests() {
       .transfer([buffer])
       .execute();
 
-    const chunks = [];
+    const chunks: number[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk);
+      chunks.push(chunk as number);
     }
     assert.deepStrictEqual(chunks, [10, 20]);
     // Buffer should be detached after transfer
@@ -1056,14 +1058,15 @@ async function runTests() {
       })
       .execute();
 
-    const chunks = [];
+    const chunks: number[] = [];
     try {
       for await (const chunk of stream) {
-        chunks.push(chunk);
+        chunks.push(chunk as number);
       }
       assert.fail('Should have thrown');
-    } catch (err) {
-      assert.strictEqual(err.message, 'generator error');
+    } catch (err: unknown) {
+      const error = err as Error;
+      assert.strictEqual(error.message, 'generator error');
       assert.deepStrictEqual(chunks, [1]);
     }
   });
@@ -1081,9 +1084,9 @@ async function runTests() {
       })
       .execute();
 
-    const chunks = [];
+    const chunks: string[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk);
+      chunks.push(chunk as string);
     }
     
     assert.deepStrictEqual(chunks, ['first', 'second', 'third']);
@@ -1139,11 +1142,11 @@ async function runTests() {
   await test('handles many concurrent tasks', async () => {
     beeThreads.configure({ poolSize: 4 });
     
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 20; i++) {
       tasks.push(
         beeThreads
-          .run((n) => n * 2)
+          .run((n: number) => n * 2)
           .usingParams(i)
           .execute()
       );
@@ -1176,7 +1179,7 @@ async function runTests() {
 
   await test('configure() throws for non-number workerIdleTimeout', () => {
     assert.throws(
-      () => beeThreads.configure({ workerIdleTimeout: 'fast' }),
+      () => beeThreads.configure({ workerIdleTimeout: 'fast' as any }),
       TypeError
     );
   });
@@ -1210,7 +1213,7 @@ async function runTests() {
     const items = [10, 20, 30];
 
     const result = await beeThreads
-      .run(() => items.reduce((a, b) => a + b, 0))
+      .run(() => items.reduce((a: number, b: number) => a + b, 0))
       .setContext({ items })
       .execute();
 
@@ -1221,7 +1224,7 @@ async function runTests() {
     const helperCode = '(x) => x * 2';
 
     const result = await beeThreads
-      .run((val) => {
+      .run((val: number) => {
         const helper = eval(helperCode);
         return helper(val);
       })
@@ -1242,7 +1245,7 @@ async function runTests() {
     const controller = new AbortController();
 
     const result = await beeThreads
-      .run((x) => x * factor)
+      .run((x: number) => x * factor)
       .setContext({ factor })
       .signal(controller.signal)
       .retry({ maxAttempts: 2 })
@@ -1256,7 +1259,7 @@ async function runTests() {
     const factor = 3;
 
     const result = await beeThreads
-      .run((x) => x * factor)
+      .run((x: number) => x * factor)
       .usingParams(14)
       .retry({ maxAttempts: 2 })
       .setContext({ factor })
@@ -1371,12 +1374,12 @@ async function runTests() {
   section('Task Priority');
 
   await test('priority() method exists on executor', () => {
-    const exec = beeThreads.run((x) => x);
+    const exec = beeThreads.run((x: number) => x);
     assert.ok(typeof exec.priority === 'function', 'priority method should exist');
   });
 
   await test('priority() returns new executor', () => {
-    const exec1 = beeThreads.run((x) => x);
+    const exec1 = beeThreads.run((x: number) => x);
     const exec2 = exec1.priority('high');
     assert.notStrictEqual(exec1, exec2);
   });
@@ -1422,26 +1425,26 @@ async function runTests() {
   });
 
   await test('cache.set() and cache.get() work correctly', () => {
-    const cache = createLRUCache(10);
+    const cache = createLRUCache<string, string>(10);
     cache.set('key1', 'value1');
     assert.strictEqual(cache.get('key1'), 'value1');
     assert.strictEqual(cache.size(), 1);
   });
 
   await test('cache.has() checks existence without updating LRU', () => {
-    const cache = createLRUCache(10);
+    const cache = createLRUCache<string, string>(10);
     cache.set('key1', 'value1');
     assert.strictEqual(cache.has('key1'), true);
     assert.strictEqual(cache.has('nonexistent'), false);
   });
 
   await test('cache.get() returns undefined for missing keys', () => {
-    const cache = createLRUCache(10);
+    const cache = createLRUCache<string, string>(10);
     assert.strictEqual(cache.get('nonexistent'), undefined);
   });
 
   await test('cache evicts LRU entry when full', () => {
-    const cache = createLRUCache(3);
+    const cache = createLRUCache<string, number>(3);
     cache.set('a', 1);
     cache.set('b', 2);
     cache.set('c', 3);
@@ -1456,7 +1459,7 @@ async function runTests() {
   });
 
   await test('cache.get() moves entry to most recent', () => {
-    const cache = createLRUCache(3);
+    const cache = createLRUCache<string, number>(3);
     cache.set('a', 1);
     cache.set('b', 2);
     cache.set('c', 3);
@@ -1472,7 +1475,7 @@ async function runTests() {
   });
 
   await test('cache.clear() removes all entries', () => {
-    const cache = createLRUCache(10);
+    const cache = createLRUCache<string, number>(10);
     cache.set('a', 1);
     cache.set('b', 2);
     cache.clear();
@@ -1526,7 +1529,7 @@ async function runTests() {
   section('Cache Integration (bee-threads)');
 
   await test('repeated bee() calls benefit from cache', async () => {
-    const fn = (x) => x * 2;
+    const fn = (x: number) => x * 2;
     
     // Run same function multiple times
     const results = await Promise.all([
@@ -1542,9 +1545,9 @@ async function runTests() {
 
   await test('repeated beeThreads calls benefit from cache', async () => {
     // Run same function multiple times
-    const results = [];
+    const results: number[] = [];
     for (let i = 0; i < 5; i++) {
-      const r = await beeThreads.run((x) => x * 3).usingParams(i).execute();
+      const r = await beeThreads.run((x: number) => x * 3).usingParams(i).execute();
       results.push(r);
     }
     
@@ -1552,17 +1555,17 @@ async function runTests() {
   });
 
   await test('stream generator benefits from cache', async () => {
-    const results1 = [];
-    const stream1 = beeThreads.stream(function* (n) {
+    const results1: number[] = [];
+    const stream1 = beeThreads.stream(function* (n: number) {
       for (let i = 0; i < n; i++) yield i;
     }).usingParams(3).execute();
-    for await (const v of stream1) results1.push(v);
+    for await (const v of stream1) results1.push(v as number);
     
-    const results2 = [];
-    const stream2 = beeThreads.stream(function* (n) {
+    const results2: number[] = [];
+    const stream2 = beeThreads.stream(function* (n: number) {
       for (let i = 0; i < n; i++) yield i;
     }).usingParams(3).execute();
-    for await (const v of stream2) results2.push(v);
+    for await (const v of stream2) results2.push(v as number);
     
     assert.deepStrictEqual(results1, [0, 1, 2]);
     assert.deepStrictEqual(results2, [0, 1, 2]);
@@ -1579,7 +1582,7 @@ async function runTests() {
     beeThreads.configure({ poolSize: 4 });
     
     // Run the same function multiple times
-    const fn = (x) => x * 2;
+    const fn = (x: number) => x * 2;
     for (let i = 0; i < 10; i++) {
       await beeThreads.run(fn).usingParams(i).execute();
     }
@@ -1646,7 +1649,7 @@ async function runTests() {
 
   await test('configure() throws for non-boolean lowMemoryMode', () => {
     assert.throws(
-      () => beeThreads.configure({ lowMemoryMode: 'yes' }),
+      () => beeThreads.configure({ lowMemoryMode: 'yes' as any }),
       TypeError
     );
   });
@@ -1655,12 +1658,12 @@ async function runTests() {
     beeThreads.configure({ lowMemoryMode: true });
     await beeThreads.shutdown(); // Force new workers
     
-    const result = await bee(x => x * 2)(21);
+    const result = await bee((x: number) => x * 2)(21);
     assert.strictEqual(result, 42);
   });
 
   await test('lowMemoryMode works with context', async () => {
-    const result = await bee(x => x * MULT)(5, { beeClosures: { MULT: 10 } });
+    const result = await bee((x: number) => x * MULT)(5, { beeClosures: { MULT: 10 } });
     assert.strictEqual(result, 50);
   });
 
@@ -1670,10 +1673,10 @@ async function runTests() {
   section('vm.Script Optimization (context)');
 
   await test('vm.Script compiles with context correctly', async () => {
-    const MULT = 100;
+    const VM_MULT = 100;
     const result = await beeThreads
-      .run((x) => x * MULT)
-      .setContext({ MULT })
+      .run((x: number) => x * VM_MULT)
+      .setContext({ VM_MULT })
       .usingParams(5)
       .execute();
     assert.strictEqual(result, 500);
@@ -1682,7 +1685,7 @@ async function runTests() {
   await test('vm.Script provides require in context', async () => {
     const PREFIX = 'hash:';
     const result = await beeThreads
-      .run((data) => {
+      .run((data: string) => {
         const crypto = require('crypto');
         return PREFIX + crypto.createHash('md5').update(data).digest('hex').slice(0, 8);
       })
@@ -1711,9 +1714,9 @@ async function runTests() {
   section('Stress Tests');
 
   await test('20 parallel tasks (same function)', async () => {
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 20; i++) {
-      tasks.push(bee(n => n * n)(i));
+      tasks.push(bee((n: number) => n * n)(i));
     }
     const results = await Promise.all(tasks);
     assert.strictEqual(results.length, 20);
@@ -1723,9 +1726,9 @@ async function runTests() {
   });
 
   await test('50 parallel tasks (same function)', async () => {
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 50; i++) {
-      tasks.push(bee(n => n + 1)(i));
+      tasks.push(bee((n: number) => n + 1)(i));
     }
     const results = await Promise.all(tasks);
     assert.strictEqual(results.length, 50);
@@ -1734,9 +1737,9 @@ async function runTests() {
   });
 
   await test('100 parallel tasks (same function)', async () => {
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 100; i++) {
-      tasks.push(bee(x => x * 2)(i));
+      tasks.push(bee((x: number) => x * 2)(i));
     }
     const results = await Promise.all(tasks);
     assert.strictEqual(results.length, 100);
@@ -1745,9 +1748,9 @@ async function runTests() {
   });
 
   await test('20 parallel tasks with context', async () => {
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 20; i++) {
-      tasks.push(bee(n => n * MULT)(i)({ beeClosures: { MULT: 10 } }));
+      tasks.push(bee((n: number) => n * MULT)(i)({ beeClosures: { MULT: 10 } }));
     }
     const results = await Promise.all(tasks);
     assert.strictEqual(results.length, 20);
@@ -1757,16 +1760,16 @@ async function runTests() {
 
   await test('mixed parallel tasks (different functions)', async () => {
     const tasks = [
-      bee(x => x + 1)(10),
-      bee(x => x * 2)(10),
-      bee(x => x - 1)(10),
-      bee(x => x / 2)(10),
-      bee(x => x ** 2)(10),
-      bee(x => Math.sqrt(x))(100),
+      bee((x: number) => x + 1)(10),
+      bee((x: number) => x * 2)(10),
+      bee((x: number) => x - 1)(10),
+      bee((x: number) => x / 2)(10),
+      bee((x: number) => x ** 2)(10),
+      bee((x: number) => Math.sqrt(x))(100),
       bee(() => 42)(),
-      bee((a, b) => a + b)(20, 22),
-      bee(x => x.toString())(123),
-      bee(arr => arr.length)([1,2,3,4,5]),
+      bee((a: number, b: number) => a + b)(20, 22),
+      bee((x: number) => x.toString())(123),
+      bee((arr: number[]) => arr.length)([1,2,3,4,5]),
     ];
     const results = await Promise.all(tasks);
     assert.strictEqual(results[0], 11);
@@ -1783,7 +1786,7 @@ async function runTests() {
 
   await test('stress: rapid sequential tasks', async () => {
     for (let i = 0; i < 50; i++) {
-      const result = await bee(n => n)(i);
+      const result = await bee((n: number) => n)(i);
       assert.strictEqual(result, i);
     }
   });
@@ -1795,8 +1798,8 @@ async function runTests() {
 
   await test('concurrent cache access (same key)', async () => {
     // All tasks use exact same function - tests cache race conditions
-    const fn = x => x * 2;
-    const tasks = [];
+    const fn = (x: number) => x * 2;
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 30; i++) {
       tasks.push(bee(fn)(i));
     }
@@ -1808,10 +1811,10 @@ async function runTests() {
 
   await test('concurrent cache access (different keys)', async () => {
     // Each task uses different function - tests cache eviction races
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 30; i++) {
       // Create unique function for each task
-      tasks.push(bee(new Function('x', `return x + ${i}`))(100));
+      tasks.push(bee(new Function('x', `return x + ${i}`) as (x: number) => number)(100));
     }
     const results = await Promise.all(tasks);
     for (let i = 0; i < 30; i++) {
@@ -1820,10 +1823,10 @@ async function runTests() {
   });
 
   await test('concurrent context injection', async () => {
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 20; i++) {
       // Each task has different context value
-      tasks.push(bee(x => x * FACTOR)(10)({ beeClosures: { FACTOR: i } }));
+      tasks.push(bee((x: number) => x * FACTOR)(10)({ beeClosures: { FACTOR: i } }));
     }
     const results = await Promise.all(tasks);
     for (let i = 0; i < 20; i++) {
@@ -1833,8 +1836,8 @@ async function runTests() {
 
   await test('concurrent worker affinity', async () => {
     // Same function should route to same worker (when possible)
-    const fn = n => n * n;
-    const tasks = [];
+    const fn = (n: number) => n * n;
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 40; i++) {
       tasks.push(bee(fn)(i));
     }
@@ -1847,12 +1850,12 @@ async function runTests() {
   });
 
   await test('interleaved sync and async functions', async () => {
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 20; i++) {
       if (i % 2 === 0) {
-        tasks.push(bee(x => x)(i)); // sync
+        tasks.push(bee((x: number) => x)(i)); // sync
       } else {
-        tasks.push(bee(async x => x)(i)); // async
+        tasks.push(bee(async (x: number) => x)(i)); // async
       }
     }
     const results = await Promise.all(tasks);
@@ -1868,9 +1871,9 @@ async function runTests() {
 
   await test('many unique functions (cache eviction)', async () => {
     // Create more unique functions than cache size (default 100)
-    const results = [];
+    const results: number[] = [];
     for (let i = 0; i < 150; i++) {
-      const result = await bee(new Function('return ' + i))();
+      const result = await bee(new Function('return ' + i) as () => number)();
       results.push(result);
     }
     // Verify all executed correctly despite cache evictions
@@ -1881,14 +1884,14 @@ async function runTests() {
 
   await test('large data transfer', async () => {
     const largeArray = new Array(10000).fill(0).map((_, i) => i);
-    const result = await bee(arr => arr.reduce((a, b) => a + b, 0))(largeArray);
+    const result = await bee((arr: number[]) => arr.reduce((a, b) => a + b, 0))(largeArray);
     assert.strictEqual(result, 49995000);
   });
 
   await test('repeated large computations', async () => {
-    const tasks = [];
+    const tasks: Promise<number>[] = [];
     for (let i = 0; i < 10; i++) {
-      tasks.push(bee(n => {
+      tasks.push(bee((n: number) => {
         let sum = 0;
         for (let j = 0; j < n; j++) sum += j;
         return sum;
@@ -1910,26 +1913,26 @@ async function runTests() {
   await test('captures ReferenceError (undefined variable)', async () => {
     try {
       await beeThreads
-        .run(() => undefinedVariable)
+        .run(() => (undefinedVariable as any))
         .execute();
       assert.fail('Should have thrown');
-    } catch (err) {
+    } catch (err: unknown) {
       assert.ok(err instanceof WorkerError, 'Should be WorkerError');
-      assert.strictEqual(err.name, 'ReferenceError');
-      assert.ok(err.message.includes('undefinedVariable'), `Message should mention variable: ${err.message}`);
+      assert.strictEqual((err as Error).name, 'ReferenceError');
+      assert.ok((err as Error).message.includes('undefinedVariable'), `Message should mention variable: ${(err as Error).message}`);
     }
   });
 
   await test('captures TypeError (null property access)', async () => {
     try {
       await beeThreads
-        .run(() => null.property)
+        .run(() => (null as any).property)
         .execute();
       assert.fail('Should have thrown');
-    } catch (err) {
+    } catch (err: unknown) {
       assert.ok(err instanceof WorkerError, 'Should be WorkerError');
-      assert.strictEqual(err.name, 'TypeError');
-      assert.ok(err.message.includes('null'), `Message should mention null: ${err.message}`);
+      assert.strictEqual((err as Error).name, 'TypeError');
+      assert.ok((err as Error).message.includes('null'), `Message should mention null: ${(err as Error).message}`);
     }
   });
 
@@ -1938,13 +1941,13 @@ async function runTests() {
       await beeThreads
         .run(() => {
           const obj = undefined;
-          return obj.property;
+          return (obj as any).property;
         })
         .execute();
       assert.fail('Should have thrown');
-    } catch (err) {
+    } catch (err: unknown) {
       assert.ok(err instanceof WorkerError, 'Should be WorkerError');
-      assert.strictEqual(err.name, 'TypeError');
+      assert.strictEqual((err as Error).name, 'TypeError');
     }
   });
 
@@ -1956,9 +1959,9 @@ async function runTests() {
         })
         .execute();
       assert.fail('Should have thrown');
-    } catch (err) {
+    } catch (err: unknown) {
       assert.ok(err instanceof WorkerError, 'Should be WorkerError');
-      assert.ok(err.message.includes('async rejection test'), `Message: ${err.message}`);
+      assert.ok((err as Error).message.includes('async rejection test'), `Message: ${(err as Error).message}`);
     }
   });
 
@@ -1966,16 +1969,17 @@ async function runTests() {
     try {
       await beeThreads
         .run(() => {
-          const f = () => f();
-          return f();
+          // Use eval to prevent tsx from transforming the function
+          const recurse = eval('(function f() { return f(); })');
+          return recurse();
         })
         .execute();
       assert.fail('Should have thrown');
-    } catch (err) {
+    } catch (err: unknown) {
       assert.ok(err instanceof WorkerError, 'Should be WorkerError');
-      assert.strictEqual(err.name, 'RangeError');
-      assert.ok(err.message.includes('stack') || err.message.includes('recursion'), 
-        `Message should mention stack: ${err.message}`);
+      assert.strictEqual((err as Error).name, 'RangeError');
+      assert.ok((err as Error).message.includes('stack') || (err as Error).message.includes('recursion'), 
+        `Message should mention stack: ${(err as Error).message}`);
     }
   });
 
@@ -1987,13 +1991,160 @@ async function runTests() {
         })
         .execute();
       assert.fail('Should have thrown');
-    } catch (err) {
-      assert.ok(err.stack, 'Error should have stack trace');
-      assert.ok(err.stack.length > 0, 'Stack trace should not be empty');
+    } catch (err: unknown) {
+      const error = err as Error;
+      assert.ok(error.stack, 'Error should have stack trace');
+      assert.ok(error.stack.length > 0, 'Stack trace should not be empty');
     }
   });
 
   await beeThreads.shutdown();
+
+  // ---------- DEBUG MODE ----------
+  section('debugMode Configuration');
+
+  await test('configure() accepts debugMode', () => {
+    beeThreads.configure({ debugMode: true });
+    // No direct way to check, but should not throw
+  });
+
+  await test('configure() throws for non-boolean debugMode', () => {
+    assert.throws(
+      () => beeThreads.configure({ debugMode: 'yes' as unknown as boolean }),
+      TypeError
+    );
+  });
+
+  await test('debugMode false disables code dump', async () => {
+    beeThreads.configure({ debugMode: false });
+    await beeThreads.shutdown();
+    
+    // Should still work, just without code dump
+    const result = await beeThreads.run(() => 42).execute();
+    assert.strictEqual(result, 42);
+  });
+
+  beeThreads.configure({ debugMode: true }); // Reset for other tests
+
+  // ---------- CUSTOM LOGGER ----------
+  section('Logger Configuration');
+
+  await test('configure() accepts logger', () => {
+    const logs: unknown[][] = [];
+    const customLogger: Logger = {
+      log: (...args: unknown[]) => logs.push(['log', ...args]),
+      warn: (...args: unknown[]) => logs.push(['warn', ...args]),
+      error: (...args: unknown[]) => logs.push(['error', ...args]),
+      info: (...args: unknown[]) => logs.push(['info', ...args]),
+      debug: (...args: unknown[]) => logs.push(['debug', ...args]),
+    };
+    beeThreads.configure({ logger: customLogger });
+    // Should not throw
+  });
+
+  await test('configure() accepts null logger (disable logging)', () => {
+    beeThreads.configure({ logger: null });
+    // Should not throw
+  });
+
+  await test('noopLogger is exported and works', () => {
+    assert.ok(noopLogger, 'noopLogger should be exported');
+    assert.ok(typeof noopLogger.log === 'function');
+    assert.ok(typeof noopLogger.warn === 'function');
+    assert.ok(typeof noopLogger.error === 'function');
+    // Should not throw
+    noopLogger.log('test');
+    noopLogger.warn('test');
+    noopLogger.error('test');
+  });
+
+  await test('configure() throws for invalid logger', () => {
+    assert.throws(
+      () => beeThreads.configure({ logger: 'not a logger' as unknown as Logger }),
+      TypeError
+    );
+    assert.throws(
+      () => beeThreads.configure({ logger: {} as Logger }),
+      TypeError
+    );
+  });
+
+  await test('custom logger receives worker logs', async () => {
+    const logs: unknown[][] = [];
+    const customLogger: Logger = {
+      log: (...args: unknown[]) => logs.push(['log', ...args]),
+      warn: (...args: unknown[]) => logs.push(['warn', ...args]),
+      error: (...args: unknown[]) => logs.push(['error', ...args]),
+      info: (...args: unknown[]) => logs.push(['info', ...args]),
+      debug: (...args: unknown[]) => logs.push(['debug', ...args]),
+    };
+    beeThreads.configure({ logger: customLogger });
+    await beeThreads.shutdown();
+
+    await beeThreads.run(() => {
+      console.log('custom log test');
+      return 'done';
+    }).execute();
+
+    assert.ok(logs.some(l => l[0] === 'log' && l.some(arg => String(arg).includes('custom log test'))),
+      'Custom logger should receive log');
+  });
+
+  await test('null logger disables log forwarding', async () => {
+    beeThreads.configure({ logger: null });
+    await beeThreads.shutdown();
+
+    // Should not throw even with logs
+    const result = await beeThreads.run(() => {
+      console.log('should not cause error');
+      return 42;
+    }).execute();
+    
+    assert.strictEqual(result, 42);
+  });
+
+  // Reset logger
+  beeThreads.configure({ logger: console });
+
+  // ---------- SYMBOL.DISPOSE ----------
+  section('Symbol.dispose Support');
+
+  await test('beeThreads has Symbol.dispose', () => {
+    assert.ok(typeof (beeThreads as any)[Symbol.dispose] === 'function', 
+      'beeThreads should have Symbol.dispose');
+  });
+
+  await test('beeThreads has Symbol.asyncDispose', () => {
+    assert.ok(typeof (beeThreads as any)[Symbol.asyncDispose] === 'function',
+      'beeThreads should have Symbol.asyncDispose');
+  });
+
+  await test('Symbol.dispose shuts down workers', async () => {
+    await beeThreads.run(() => 1).execute();
+    const before = beeThreads.getPoolStats().normal.size;
+    assert.ok(before > 0, 'Should have workers before dispose');
+    
+    // Call dispose
+    (beeThreads as any)[Symbol.dispose]();
+    
+    // Give time for async shutdown
+    await new Promise(r => setTimeout(r, 100));
+    
+    const after = beeThreads.getPoolStats().normal.size;
+    assert.strictEqual(after, 0, 'Workers should be terminated after dispose');
+  });
+
+  await test('Symbol.asyncDispose awaits shutdown', async () => {
+    await beeThreads.run(() => 1).execute();
+    const before = beeThreads.getPoolStats().normal.size;
+    assert.ok(before > 0, 'Should have workers before dispose');
+    
+    // Call async dispose
+    await (beeThreads as any)[Symbol.asyncDispose]();
+    
+    const after = beeThreads.getPoolStats().normal.size;
+    assert.strictEqual(after, 0, 'Workers should be terminated after asyncDispose');
+  });
 
   // ---------- CLEANUP ----------
   section('Cleanup');
@@ -2036,7 +2187,27 @@ async function runTests() {
   process.exit(failed > 0 ? 1 : 0);
 }
 
+// Declare global variables used in tests
+declare const undefinedVariable: any;
+declare const TAX: number;
+declare const VALUE: number;
+declare const MULT: number;
+declare const A: number;
+declare const B: number;
+declare const config: any;
+declare const values: number[];
+declare const helperCode: string;
+declare const factor: number;
+declare const prefix: string;
+declare const label: string;
+declare const multiplier: number;
+declare const items: number[];
+declare const arr: number[];
+declare const PREFIX: string;
+declare const FACTOR: number;
+
 runTests().catch(err => {
   console.error('Test suite crashed:', err);
   process.exit(1);
 });
+

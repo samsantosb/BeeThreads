@@ -15,6 +15,7 @@
 
 import { parentPort, workerData } from 'worker_threads';
 import { createFunctionCache } from './cache';
+import { MessageType, LogLevel } from './types';
 import type { WorkerMessage, SerializedError, FunctionCache } from './types';
 
 // Type guard for parentPort (it's null in main thread)
@@ -31,13 +32,36 @@ const port = parentPort;
 interface WorkerConfig {
   functionCacheSize?: number;
   lowMemoryMode?: boolean;
+  debugMode?: boolean;
 }
 
 const workerConfig = (workerData as WorkerConfig) || {};
+const DEBUG_MODE = workerConfig.debugMode ?? false;
+
+/** Current function being executed (for debug) */
+let currentFnSource: string | null = null;
 
 // ============================================================================
 // GLOBAL ERROR HANDLERS - Prevent worker crash without response
 // ============================================================================
+
+/**
+ * Creates a serialized error with optional debug info.
+ */
+function createSerializedError(err: Error, source?: string | null): SerializedError {
+  const serialized: SerializedError = {
+    name: err.name || 'Error',
+    message: err.message || String(err),
+    stack: err.stack
+  };
+  
+  // Include source code in debug mode for easier debugging
+  if (DEBUG_MODE && source) {
+    serialized.code = source;
+  }
+  
+  return serialized;
+}
 
 /**
  * Catches uncaught exceptions that would otherwise crash the worker.
@@ -45,12 +69,8 @@ const workerConfig = (workerData as WorkerConfig) || {};
 process.on('uncaughtException', (err: Error) => {
   try {
     port.postMessage({
-      ok: false,
-      error: {
-        name: err.name || 'UncaughtException',
-        message: err.message || String(err),
-        stack: err.stack
-      }
+      type: MessageType.ERROR,
+      error: createSerializedError(err, currentFnSource)
     });
   } catch {
     // If we can't even send the message, exit gracefully
@@ -65,12 +85,8 @@ process.on('unhandledRejection', (reason: unknown) => {
   try {
     const err = reason instanceof Error ? reason : new Error(String(reason));
     port.postMessage({
-      ok: false,
-      error: {
-        name: err.name || 'UnhandledRejection',
-        message: err.message || String(reason),
-        stack: err.stack
-      }
+      type: MessageType.ERROR,
+      error: createSerializedError(err, currentFnSource)
     });
   } catch {
     process.exit(1);
@@ -95,23 +111,23 @@ const fnCache: FunctionCache = createFunctionCache(cacheSize);
  * Redirects console.log/warn/error to main thread.
  */
 console.log = (...args: unknown[]): void => {
-  port.postMessage({ type: 'log', level: 'log', args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.LOG, args: args.map(String) });
 };
 
 console.warn = (...args: unknown[]): void => {
-  port.postMessage({ type: 'log', level: 'warn', args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.WARN, args: args.map(String) });
 };
 
 console.error = (...args: unknown[]): void => {
-  port.postMessage({ type: 'log', level: 'error', args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.ERROR, args: args.map(String) });
 };
 
 console.info = (...args: unknown[]): void => {
-  port.postMessage({ type: 'log', level: 'info', args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.INFO, args: args.map(String) });
 };
 
 console.debug = (...args: unknown[]): void => {
-  port.postMessage({ type: 'log', level: 'debug', args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.DEBUG, args: args.map(String) });
 };
 
 // ============================================================================
@@ -128,16 +144,27 @@ console.debug = (...args: unknown[]): void => {
  * false even for real Error objects from the vm context.
  */
 function serializeError(e: unknown): SerializedError {
+  let serialized: SerializedError;
+  
   // Check for error-like objects (has name and message properties)
   if (e && typeof e === 'object' && 'name' in e && 'message' in e) {
     const err = e as { name: string; message: string; stack?: string };
-    return { name: err.name, message: err.message, stack: err.stack };
+    serialized = { name: err.name, message: err.message, stack: err.stack };
   }
   // For non-error objects, try to get useful information
-  if (e instanceof Error) {
-    return { name: e.name, message: e.message, stack: e.stack };
+  else if (e instanceof Error) {
+    serialized = { name: e.name, message: e.message, stack: e.stack };
   }
-  return { name: 'Error', message: String(e) };
+  else {
+    serialized = { name: 'Error', message: String(e) };
+  }
+  
+  // Include source code in debug mode
+  if (DEBUG_MODE && currentFnSource) {
+    serialized.code = currentFnSource;
+  }
+  
+  return serialized;
 }
 
 // ============================================================================
@@ -227,6 +254,9 @@ function applyCurried(fn: Function, args: unknown[]): unknown {
 port.on('message', (message: WorkerMessage) => {
   const { fn: src, args, context } = message;
   
+  // Store current function source for debug error messages
+  currentFnSource = src;
+  
   try {
     validateFunctionSource(src);
 
@@ -243,13 +273,21 @@ port.on('message', (message: WorkerMessage) => {
     // Handle async results
     if (ret && typeof ret === 'object' && 'then' in ret && typeof (ret as Promise<unknown>).then === 'function') {
       (ret as Promise<unknown>)
-        .then(v => port.postMessage({ ok: true, value: v }))
-        .catch(e => port.postMessage({ ok: false, error: serializeError(e) }));
+        .then(v => {
+          currentFnSource = null;
+          port.postMessage({ type: MessageType.SUCCESS, value: v });
+        })
+        .catch(e => {
+          port.postMessage({ type: MessageType.ERROR, error: serializeError(e) });
+          currentFnSource = null;
+        });
     } else {
-      port.postMessage({ ok: true, value: ret });
+      currentFnSource = null;
+      port.postMessage({ type: MessageType.SUCCESS, value: ret });
     }
   } catch (e) {
-    port.postMessage({ ok: false, error: serializeError(e) });
+    port.postMessage({ type: MessageType.ERROR, error: serializeError(e) });
+    currentFnSource = null;
   }
 });
 

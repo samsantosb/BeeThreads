@@ -16,16 +16,18 @@ import { config, metrics } from './config';
 import { requestWorker, releaseWorker, fastHash } from './pool';
 import { sleep, calculateBackoff } from './utils';
 import { AbortError, TimeoutError, WorkerError } from './errors';
+import { MessageType } from './types';
 import type {
   PoolType,
   Priority,
   ExecutionOptions,
-  WorkerResponse,
+  WorkerResponseCompat,
   WorkerSuccessResponse,
   WorkerErrorResponse,
   WorkerLogMessage,
   WorkerEntry,
-  RetryConfig
+  RetryConfig,
+  LogLevelValue
 } from './types';
 
 // ============================================================================
@@ -119,23 +121,48 @@ export async function executeOnce<T = unknown>(
       }
     };
 
-    const onMessage = (msg: WorkerResponse): void => {
+    const onMessage = (msg: WorkerResponseCompat): void => {
       // Handle console logs from worker
-      if ('type' in msg && msg.type === 'log') {
+      if ('type' in msg && msg.type === MessageType.LOG) {
         const logMsg = msg as WorkerLogMessage;
-        const logFn = (console as unknown as Record<string, Function>)[logMsg.level] || console.log;
-        logFn('[worker]', ...logMsg.args);
+        // Use configured logger (or skip if null)
+        if (config.logger) {
+          const logFn = config.logger[logMsg.level as keyof typeof config.logger] as ((...args: unknown[]) => void) | undefined;
+          if (typeof logFn === 'function') {
+            logFn('[worker]', ...logMsg.args);
+          } else {
+            config.logger.log('[worker]', ...logMsg.args);
+          }
+        }
         return;
       }
 
-      if ('ok' in msg) {
-        if (msg.ok) {
+      // New format: type-based discriminated union
+      if ('type' in msg) {
+        if (msg.type === MessageType.SUCCESS) {
           settle(true, (msg as WorkerSuccessResponse).value);
-        } else {
+        } else if (msg.type === MessageType.ERROR) {
           const errMsg = msg as WorkerErrorResponse;
           const err = new WorkerError(errMsg.error.message);
           err.name = errMsg.error.name || 'Error';
           if (errMsg.error.stack) err.stack = errMsg.error.stack;
+          // Log code dump in debug mode
+          if (config.debugMode && errMsg.error.code && config.logger) {
+            config.logger.error('[bee-threads] Failed function:\n', errMsg.error.code);
+          }
+          settle(false, err);
+        }
+        return;
+      }
+
+      // Legacy format: ok-based (backwards compatibility)
+      if ('ok' in msg) {
+        if (msg.ok) {
+          settle(true, msg.value);
+        } else {
+          const err = new WorkerError(msg.error.message);
+          err.name = msg.error.name || 'Error';
+          if (msg.error.stack) err.stack = msg.error.stack;
           settle(false, err);
         }
       }
