@@ -94,6 +94,9 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
       let isTemporary = false;
       let closed = false;
       let returnValue: T | undefined = undefined;
+      
+      // Flag to prevent race condition between cancel() terminate and onExit
+      let isCancelled = false;
 
       const cleanup = (): void => {
         if (closed) return;
@@ -165,7 +168,10 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
 
             streamWorker.on('exit', (code: number) => {
               if (closed) return;
-              if (code !== 0) {
+              // Ignore exit if it was caused by intentional cancellation
+              // This prevents race condition where terminate()'s async 'exit' event
+              // could fire before cleanup() sets closed = true
+              if (code !== 0 && !isCancelled) {
                 controller.error(new WorkerError(`Worker exited with code ${code}`));
               }
               cleanup();
@@ -182,7 +188,10 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
         },
 
         cancel() {
-          if (streamWorker && !closed) streamWorker.terminate();
+          if (streamWorker && !closed) {
+            isCancelled = true;  // Mark before terminate to prevent onExit race
+            streamWorker.terminate();
+          }
           cleanup();
         }
       });

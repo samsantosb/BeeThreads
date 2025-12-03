@@ -240,6 +240,9 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
 
 /**
  * Returns a worker to the pool after task completion.
+ * 
+ * @param terminated - If true, the worker was forcefully terminated (timeout/abort)
+ *                     and should be removed from pool instead of returned
  */
 export function releaseWorker(
   entry: WorkerEntry | null,
@@ -248,24 +251,46 @@ export function releaseWorker(
   poolType: PoolType,
   executionTime: number = 0,
   failed: boolean = false,
-  fnHash: string | null = null
+  fnHash: string | null = null,
+  terminated: boolean = false
 ): void {
   if (temporary) {
     metrics.activeTemporaryWorkers--;
     metrics.temporaryWorkerTasks++;
     metrics.temporaryWorkerExecutionTime += executionTime;
-    worker.terminate();
+    // Only terminate if not already terminated
+    if (!terminated) {
+      worker.terminate();
+    }
     return;
   }
 
   if (!entry) return;
 
   const counters = poolCounters[poolType];
+  const pool = pools[poolType];
 
   // Update stats
   entry.tasksExecuted++;
   entry.totalExecutionTime += executionTime;
   if (failed) entry.failedTasks++;
+
+  // If worker was forcefully terminated, remove from pool
+  if (terminated) {
+    if (entry.terminationTimer) {
+      clearTimeout(entry.terminationTimer);
+    }
+    const idx = pool.indexOf(entry);
+    if (idx !== -1) {
+      pool.splice(idx, 1);
+      if (entry.busy) {
+        counters.busy--;
+      } else {
+        counters.idle--;
+      }
+    }
+    return;
+  }
 
   // Track function for affinity
   if (fnHash && !config.lowMemoryMode) {

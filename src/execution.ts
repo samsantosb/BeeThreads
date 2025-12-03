@@ -173,6 +173,9 @@ export async function executeOnce<T = unknown>(
     };
 
     const onExit = (code: number): void => {
+      // settled is checked first - timeout/abort handlers set it before terminate()
+      // This prevents race condition where terminate()'s async 'exit' event
+      // could beat the settle() call
       if (!settled && code !== 0) {
         settle(false, new WorkerError(`Worker exited with code ${code}`));
       }
@@ -181,8 +184,27 @@ export async function executeOnce<T = unknown>(
     // Setup abort signal handler
     if (signal) {
       abortHandler = (): void => {
+        if (settled) return;
+        // CRITICAL: Set settled FIRST to prevent any race condition
+        // This ensures onExit cannot run even if terminate() triggers exit synchronously
+        settled = true;
+        
+        if (timer) clearTimeout(timer);
+        worker.removeListener('message', onMessage);
+        worker.removeListener('error', onError);
+        worker.removeListener('exit', onExit);
+        
         worker.terminate();
-        settle(false, new AbortError((signal.reason as Error)?.message));
+        
+        // Release worker with terminated=true to remove from pool
+        releaseWorker(entry, worker, temporary, poolType, Date.now() - startTime, true, fnHash, true);
+        metrics.totalTasksFailed++;
+        
+        if (safe) {
+          resolve({ status: 'rejected', error: new AbortError((signal.reason as Error)?.message) });
+        } else {
+          reject(new AbortError((signal.reason as Error)?.message));
+        }
       };
       signal.addEventListener('abort', abortHandler);
     }
@@ -190,8 +212,27 @@ export async function executeOnce<T = unknown>(
     // Setup timeout
     if (timeout) {
       timer = setTimeout(() => {
+        if (settled) return;
+        // CRITICAL: Set settled FIRST to prevent any race condition
+        // This ensures onExit cannot run even if terminate() triggers exit synchronously
+        settled = true;
+        
+        if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
+        worker.removeListener('message', onMessage);
+        worker.removeListener('error', onError);
+        worker.removeListener('exit', onExit);
+        
         worker.terminate();
-        settle(false, new TimeoutError(timeout));
+        
+        // Release worker with terminated=true to remove from pool
+        releaseWorker(entry, worker, temporary, poolType, Date.now() - startTime, true, fnHash, true);
+        metrics.totalTasksFailed++;
+        
+        if (safe) {
+          resolve({ status: 'rejected', error: new TimeoutError(timeout) });
+        } else {
+          reject(new TimeoutError(timeout));
+        }
       }, timeout);
     }
 

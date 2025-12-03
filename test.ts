@@ -316,6 +316,36 @@ async function runTests(): Promise<void> {
     );
   });
 
+  await test('timeout race condition - always returns TimeoutError', async () => {
+    // This test verifies the fix for the race condition where worker.terminate()
+    // fires 'exit' event asynchronously, potentially causing WorkerError instead
+    // of TimeoutError in ~50% of cases
+    const results = { timeout: 0, workerError: 0, other: 0 };
+    
+    for (let i = 0; i < 10; i++) {
+      try {
+        await beeThreads
+          .withTimeout(30)(() => {
+            while (true) {} // Busy loop
+          })
+          .execute();
+      } catch (e: unknown) {
+        const error = e as Error;
+        if (error.name === 'TimeoutError' || error instanceof TimeoutError) {
+          results.timeout++;
+        } else if (error.message?.includes('exited with code')) {
+          results.workerError++;
+        } else {
+          results.other++;
+        }
+      }
+    }
+    
+    // Should ALWAYS be TimeoutError, never WorkerError
+    assert.strictEqual(results.workerError, 0, `Got ${results.workerError} WorkerErrors instead of TimeoutError`);
+    assert.strictEqual(results.timeout, 10, `Only got ${results.timeout}/10 TimeoutErrors`);
+  });
+
   await beeThreads.shutdown();
 
   // ---------- STREAM ----------
