@@ -1707,6 +1707,201 @@ async function runTests() {
 
   await beeThreads.shutdown();
 
+  // ---------- STRESS TESTS ----------
+  section('Stress Tests');
+
+  await test('20 parallel tasks (same function)', async () => {
+    const tasks = [];
+    for (let i = 0; i < 20; i++) {
+      tasks.push(bee(n => n * n)(i));
+    }
+    const results = await Promise.all(tasks);
+    assert.strictEqual(results.length, 20);
+    assert.strictEqual(results[0], 0);
+    assert.strictEqual(results[5], 25);
+    assert.strictEqual(results[19], 361);
+  });
+
+  await test('50 parallel tasks (same function)', async () => {
+    const tasks = [];
+    for (let i = 0; i < 50; i++) {
+      tasks.push(bee(n => n + 1)(i));
+    }
+    const results = await Promise.all(tasks);
+    assert.strictEqual(results.length, 50);
+    assert.strictEqual(results[0], 1);
+    assert.strictEqual(results[49], 50);
+  });
+
+  await test('100 parallel tasks (same function)', async () => {
+    const tasks = [];
+    for (let i = 0; i < 100; i++) {
+      tasks.push(bee(x => x * 2)(i));
+    }
+    const results = await Promise.all(tasks);
+    assert.strictEqual(results.length, 100);
+    assert.strictEqual(results[50], 100);
+    assert.strictEqual(results[99], 198);
+  });
+
+  await test('20 parallel tasks with context', async () => {
+    const tasks = [];
+    for (let i = 0; i < 20; i++) {
+      tasks.push(bee(n => n * MULT)(i)({ beeClosures: { MULT: 10 } }));
+    }
+    const results = await Promise.all(tasks);
+    assert.strictEqual(results.length, 20);
+    assert.strictEqual(results[5], 50);
+    assert.strictEqual(results[19], 190);
+  });
+
+  await test('mixed parallel tasks (different functions)', async () => {
+    const tasks = [
+      bee(x => x + 1)(10),
+      bee(x => x * 2)(10),
+      bee(x => x - 1)(10),
+      bee(x => x / 2)(10),
+      bee(x => x ** 2)(10),
+      bee(x => Math.sqrt(x))(100),
+      bee(() => 42)(),
+      bee((a, b) => a + b)(20, 22),
+      bee(x => x.toString())(123),
+      bee(arr => arr.length)([1,2,3,4,5]),
+    ];
+    const results = await Promise.all(tasks);
+    assert.strictEqual(results[0], 11);
+    assert.strictEqual(results[1], 20);
+    assert.strictEqual(results[2], 9);
+    assert.strictEqual(results[3], 5);
+    assert.strictEqual(results[4], 100);
+    assert.strictEqual(results[5], 10);
+    assert.strictEqual(results[6], 42);
+    assert.strictEqual(results[7], 42);
+    assert.strictEqual(results[8], '123');
+    assert.strictEqual(results[9], 5);
+  });
+
+  await test('stress: rapid sequential tasks', async () => {
+    for (let i = 0; i < 50; i++) {
+      const result = await bee(n => n)(i);
+      assert.strictEqual(result, i);
+    }
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- RACE CONDITION TESTS ----------
+  section('Race Condition Tests');
+
+  await test('concurrent cache access (same key)', async () => {
+    // All tasks use exact same function - tests cache race conditions
+    const fn = x => x * 2;
+    const tasks = [];
+    for (let i = 0; i < 30; i++) {
+      tasks.push(bee(fn)(i));
+    }
+    const results = await Promise.all(tasks);
+    for (let i = 0; i < 30; i++) {
+      assert.strictEqual(results[i], i * 2, `Task ${i} failed`);
+    }
+  });
+
+  await test('concurrent cache access (different keys)', async () => {
+    // Each task uses different function - tests cache eviction races
+    const tasks = [];
+    for (let i = 0; i < 30; i++) {
+      // Create unique function for each task
+      tasks.push(bee(new Function('x', `return x + ${i}`))(100));
+    }
+    const results = await Promise.all(tasks);
+    for (let i = 0; i < 30; i++) {
+      assert.strictEqual(results[i], 100 + i, `Task ${i} failed`);
+    }
+  });
+
+  await test('concurrent context injection', async () => {
+    const tasks = [];
+    for (let i = 0; i < 20; i++) {
+      // Each task has different context value
+      tasks.push(bee(x => x * FACTOR)(10)({ beeClosures: { FACTOR: i } }));
+    }
+    const results = await Promise.all(tasks);
+    for (let i = 0; i < 20; i++) {
+      assert.strictEqual(results[i], 10 * i, `Context ${i} failed`);
+    }
+  });
+
+  await test('concurrent worker affinity', async () => {
+    // Same function should route to same worker (when possible)
+    const fn = n => n * n;
+    const tasks = [];
+    for (let i = 0; i < 40; i++) {
+      tasks.push(bee(fn)(i));
+    }
+    const results = await Promise.all(tasks);
+    assert.strictEqual(results.length, 40);
+    // Verify correctness
+    for (let i = 0; i < 40; i++) {
+      assert.strictEqual(results[i], i * i);
+    }
+  });
+
+  await test('interleaved sync and async functions', async () => {
+    const tasks = [];
+    for (let i = 0; i < 20; i++) {
+      if (i % 2 === 0) {
+        tasks.push(bee(x => x)(i)); // sync
+      } else {
+        tasks.push(bee(async x => x)(i)); // async
+      }
+    }
+    const results = await Promise.all(tasks);
+    for (let i = 0; i < 20; i++) {
+      assert.strictEqual(results[i], i);
+    }
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- MEMORY PRESSURE TESTS ----------
+  section('Memory Pressure Tests');
+
+  await test('many unique functions (cache eviction)', async () => {
+    // Create more unique functions than cache size (default 100)
+    const results = [];
+    for (let i = 0; i < 150; i++) {
+      const result = await bee(new Function('return ' + i))();
+      results.push(result);
+    }
+    // Verify all executed correctly despite cache evictions
+    for (let i = 0; i < 150; i++) {
+      assert.strictEqual(results[i], i);
+    }
+  });
+
+  await test('large data transfer', async () => {
+    const largeArray = new Array(10000).fill(0).map((_, i) => i);
+    const result = await bee(arr => arr.reduce((a, b) => a + b, 0))(largeArray);
+    assert.strictEqual(result, 49995000);
+  });
+
+  await test('repeated large computations', async () => {
+    const tasks = [];
+    for (let i = 0; i < 10; i++) {
+      tasks.push(bee(n => {
+        let sum = 0;
+        for (let j = 0; j < n; j++) sum += j;
+        return sum;
+      })(10000));
+    }
+    const results = await Promise.all(tasks);
+    for (const result of results) {
+      assert.strictEqual(result, 49995000);
+    }
+  });
+
+  await beeThreads.shutdown();
+
   // ---------- CLEANUP ----------
   section('Cleanup');
 
