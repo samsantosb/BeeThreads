@@ -1,6 +1,6 @@
 // test.js - bee-threads test suite
 const assert = require('assert');
-const { beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError } = require('./src/index.js');
+const { bee, beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError } = require('./src/index.js');
 
 // Test utilities
 let passed = 0;
@@ -30,6 +30,94 @@ function section(name) {
 async function runTests() {
   console.log('\n🧪 bee-threads Test Suite\n');
   console.log('='.repeat(50));
+
+  // ---------- BEE() SIMPLE API ----------
+  section('bee() - Simple Curried API');
+
+  await test('bee() executes with no arguments', async () => {
+    const result = await bee(() => 42)();
+    assert.strictEqual(result, 42);
+  });
+
+  await test('bee() executes with single argument', async () => {
+    const result = await bee(x => x * 2)(21);
+    assert.strictEqual(result, 42);
+  });
+
+  await test('bee() executes with multiple arguments', async () => {
+    const result = await bee((a, b, c) => a + b + c)(1, 2, 3);
+    assert.strictEqual(result, 6);
+  });
+
+  await test('bee() with context option', async () => {
+    const TAX = 0.2;
+    const result = await bee(p => p * (1 + TAX))(100, { context: { TAX } });
+    assert.strictEqual(result, 120);
+  });
+
+  await test('bee() with timeout option', async () => {
+    const result = await bee(() => 'fast')('ignored', { timeout: 5000 });
+    // Note: when no args needed, we still pass something to put options last
+  });
+
+  await test('bee() with safe option returns fulfilled', async () => {
+    const result = await bee(() => 'ok')(undefined, { safe: true });
+    assert.strictEqual(result.status, 'fulfilled');
+    assert.strictEqual(result.value, 'ok');
+  });
+
+  await test('bee() with safe option returns rejected on error', async () => {
+    const result = await bee(() => { throw new Error('fail'); })(undefined, { safe: true });
+    assert.strictEqual(result.status, 'rejected');
+    assert.ok(result.error instanceof Error);
+  });
+
+  await test('bee() with priority option', async () => {
+    const result = await bee(() => 'done')(undefined, { priority: 'high' });
+    assert.strictEqual(result, 'done');
+  });
+
+  await test('bee() with signal option (abort)', async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    try {
+      await bee(() => { while(true); })(undefined, { signal: ctrl.signal });
+      assert.fail('Should have thrown');
+    } catch (err) {
+      assert.ok(err instanceof AbortError);
+    }
+  });
+
+  await test('bee() throws TypeError for non-function', () => {
+    assert.throws(() => bee('not a function'), TypeError);
+    assert.throws(() => bee(123), TypeError);
+    assert.throws(() => bee(null), TypeError);
+  });
+
+  await test('bee() handles async functions', async () => {
+    const result = await bee(async (x) => {
+      return x * 2;
+    })(21);
+    assert.strictEqual(result, 42);
+  });
+
+  await test('bee() handles complex computation', async () => {
+    const result = await bee((n) => {
+      let sum = 0;
+      for (let i = 0; i < n; i++) sum += i;
+      return sum;
+    })(1000);
+    assert.strictEqual(result, 499500);
+  });
+
+  await test('bee() hash password example', async () => {
+    const hash = await bee((pwd) => {
+      const crypto = require('crypto');
+      return crypto.pbkdf2Sync(pwd, 'salt', 1000, 64, 'sha512').toString('hex');
+    })('password123');
+    assert.strictEqual(typeof hash, 'string');
+    assert.strictEqual(hash.length, 128);
+  });
 
   // ---------- BASIC RUN ----------
   section('beeThreads.run()');

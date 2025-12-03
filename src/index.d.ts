@@ -47,6 +47,90 @@ type Awaited<T> = T extends Promise<infer U> ? Awaited<U> : T;
 type UnwrapYield<T> = T extends Promise<infer U> ? U : T;
 
 // ============================================================================
+// BEE() SIMPLE CURRIED API
+// ============================================================================
+
+/**
+ * Options for the simple bee() API.
+ */
+interface BeeOptions<C extends Record<string, unknown> = Record<string, unknown>> {
+  /** Variables to inject into worker scope */
+  context?: C;
+  /** Timeout in milliseconds */
+  timeout?: number;
+  /** Cancellation signal */
+  signal?: AbortSignal;
+  /** Transferable objects for zero-copy transfer */
+  transfer?: Transferable[];
+  /** Retry configuration */
+  retry?: RetryConfig;
+  /** Task priority: 'high', 'normal', or 'low' */
+  priority?: 'high' | 'normal' | 'low';
+  /** If true, never throws - returns result object instead */
+  safe?: boolean;
+}
+
+/**
+ * Options with safe mode enabled.
+ */
+interface BeeOptionsSafe<C extends Record<string, unknown> = Record<string, unknown>> extends BeeOptions<C> {
+  safe: true;
+}
+
+/**
+ * Simple curried API for bee-threads.
+ * 
+ * @example
+ * // Simple
+ * const result = await bee(x => x * 2)(21)
+ * 
+ * @example
+ * // With context
+ * const TAX = 0.2
+ * const price = await bee(p => p * (1 + TAX))(100, { context: { TAX } })
+ * 
+ * @example
+ * // Safe mode
+ * const result = await bee(fn)(arg, { safe: true })
+ * if (result.status === 'rejected') console.error(result.error)
+ */
+interface Bee {
+  /**
+   * Creates a curried worker executor for a function.
+   * 
+   * @param fn - The function to execute in a worker thread
+   * @returns A function that accepts arguments and returns a Promise
+   */
+  <F extends (...args: any[]) => any>(fn: F): BeeExecutor<F>;
+}
+
+/**
+ * The executor returned by bee(fn).
+ * Call it with arguments to execute.
+ */
+interface BeeExecutor<F extends (...args: any[]) => any> {
+  /**
+   * Execute with no arguments.
+   */
+  (): Promise<Awaited<ReturnType<F>>>;
+  
+  /**
+   * Execute with arguments only.
+   */
+  (...args: Parameters<F>): Promise<Awaited<ReturnType<F>>>;
+  
+  /**
+   * Execute with arguments and options (safe mode).
+   */
+  <C extends Record<string, unknown>>(...args: [...Parameters<F>, BeeOptionsSafe<C>]): Promise<ThreadResult<Awaited<ReturnType<F>>>>;
+  
+  /**
+   * Execute with arguments and options.
+   */
+  <C extends Record<string, unknown>>(...args: [...Parameters<F>, BeeOptions<C>]): Promise<Awaited<ReturnType<F>>>;
+}
+
+// ============================================================================
 // RESULT TYPES
 // ============================================================================
 
@@ -525,7 +609,10 @@ interface BeeThreads {
 
 declare const beeThreads: BeeThreads;
 
+declare const bee: Bee;
+
 export { 
+  bee,
   beeThreads,
   AbortError, 
   TimeoutError, 
@@ -535,6 +622,10 @@ export {
 };
 
 export type {
+  Bee,
+  BeeOptions,
+  BeeOptionsSafe,
+  BeeExecutor,
   BeeThreads,
   ThreadResult,
   FulfilledResult,

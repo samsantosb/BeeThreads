@@ -65,6 +65,143 @@ const {
 } = require('./errors');
 
 // ============================================================================
+// SIMPLE CURRIED API
+// ============================================================================
+
+/**
+ * Reserved option keys for the bee() function.
+ * Used to detect if the last argument is an options object.
+ * @type {Set<string>}
+ * @internal
+ */
+const BEE_OPTION_KEYS = new Set([
+  'context', 'timeout', 'signal', 'transfer', 'retry', 'priority', 'safe'
+]);
+
+/**
+ * Checks if an object looks like a bee() options object.
+ * 
+ * @param {*} obj - Value to check
+ * @returns {boolean} True if obj has any known option key
+ * @internal
+ */
+function isBeeOptions(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  return Object.keys(obj).some(k => BEE_OPTION_KEYS.has(k));
+}
+
+/**
+ * Simple curried API for bee-threads.
+ * 
+ * This provides a minimal, ergonomic interface for common use cases.
+ * For advanced features, use `beeThreads` instead.
+ * 
+ * ## Syntax
+ * 
+ * ```js
+ * // No arguments
+ * await bee(fn)()
+ * 
+ * // With arguments
+ * await bee(fn)(arg1, arg2)
+ * 
+ * // With options (last argument is options object)
+ * await bee(fn)(arg1, { context: { x }, timeout: 5000 })
+ * ```
+ * 
+ * ## Options
+ * 
+ * | Key | Type | Description |
+ * |-----|------|-------------|
+ * | `context` | object | Variables to inject into worker scope |
+ * | `timeout` | number | Timeout in milliseconds |
+ * | `signal` | AbortSignal | Cancellation signal |
+ * | `transfer` | array | Transferable objects |
+ * | `retry` | object | Retry options: `{ attempts, delay, backoff }` |
+ * | `priority` | string | 'high', 'normal', or 'low' |
+ * | `safe` | boolean | If true, never throws (returns result object) |
+ * 
+ * @param {Function} fn - The function to run in a worker thread
+ * @returns {Function} A function that accepts arguments and returns a Promise
+ * 
+ * @example
+ * // Simple - double a number
+ * const result = await bee(x => x * 2)(21)
+ * // → 42
+ * 
+ * @example
+ * // With multiple arguments
+ * const sum = await bee((a, b, c) => a + b + c)(1, 2, 3)
+ * // → 6
+ * 
+ * @example
+ * // With context (external variables)
+ * const TAX = 0.2
+ * const price = await bee(p => p * (1 + TAX))(100, { context: { TAX } })
+ * // → 120
+ * 
+ * @example
+ * // With timeout
+ * const result = await bee(heavyTask)(data, { timeout: 5000 })
+ * 
+ * @example
+ * // Safe mode - never throws
+ * const result = await bee(() => JSON.parse('bad'))(undefined, { safe: true })
+ * if (result.status === 'rejected') console.error(result.error)
+ * 
+ * @example
+ * // Hash password (real-world example)
+ * const hash = await bee((pwd) => {
+ *   const crypto = require('crypto')
+ *   return crypto.pbkdf2Sync(pwd, 'salt', 100000, 64, 'sha512').toString('hex')
+ * })('user-password')
+ */
+function bee(fn) {
+  // Validate function upfront
+  if (typeof fn !== 'function') {
+    throw new TypeError(`bee() requires a function, got ${typeof fn}`);
+  }
+  
+  const fnString = fn.toString();
+  
+  /**
+   * Returns a function that executes the task with the given arguments.
+   * 
+   * @param {...*} callArgs - Arguments to pass to the function
+   * @returns {Promise<*>} Resolves with the function result
+   */
+  return function(...callArgs) {
+    // Detect if last argument is options
+    const lastArg = callArgs[callArgs.length - 1];
+    const hasOptions = callArgs.length > 0 && isBeeOptions(lastArg);
+    
+    let args, opts;
+    if (hasOptions) {
+      args = callArgs.slice(0, -1);
+      opts = lastArg;
+    } else {
+      args = callArgs;
+      opts = {};
+    }
+    
+    // Build options for execute()
+    const executeOptions = {
+      context: opts.context,
+      timeout: opts.timeout,
+      signal: opts.signal,
+      transfer: opts.transfer,
+      retry: opts.retry,
+      priority: opts.priority,
+      safe: opts.safe || false
+    };
+    
+    // Use the executor internally
+    const { execute } = require('./execution');
+    return execute(fnString, args, executeOptions);
+  };
+}
+
+// ============================================================================
 // PUBLIC API
 // ============================================================================
 
@@ -607,6 +744,7 @@ const beeThreads = {
 // ============================================================================
 
 module.exports = { 
+  bee,
   beeThreads,
   AbortError, 
   TimeoutError, 
