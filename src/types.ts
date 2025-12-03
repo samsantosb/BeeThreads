@@ -46,6 +46,18 @@ export interface PoolConfig {
   lowMemoryMode: boolean;
   resourceLimits: ResourceLimits;
   retry: RetryConfig;
+  /**
+   * Debug mode - when enabled:
+   * - Includes function source code in error messages
+   * - More verbose error logging
+   * - Useful for development, disable in production
+   */
+  debugMode: boolean;
+  /**
+   * Logger instance for worker log forwarding.
+   * null = logging disabled
+   */
+  logger: Logger | null;
 }
 
 /** User-configurable options (all optional) */
@@ -58,6 +70,17 @@ export interface ConfigureOptions {
   functionCacheSize?: number;
   lowMemoryMode?: boolean;
   resourceLimits?: ResourceLimits;
+  /**
+   * Debug mode - includes function source in errors for easier debugging.
+   * Auto-enabled when NODE_ENV !== 'production'
+   */
+  debugMode?: boolean;
+  /**
+   * Custom logger instance (Pino, Winston, console, etc).
+   * Set to null to disable worker log forwarding.
+   * @default console
+   */
+  logger?: Logger | null;
 }
 
 // ============================================================================
@@ -133,6 +156,39 @@ export interface RetryOptions {
 // MESSAGE TYPES (Worker Communication)
 // ============================================================================
 
+/**
+ * Message type constants for worker communication.
+ * Using const object instead of enum for better tree-shaking and runtime performance.
+ */
+export const MessageType = {
+  /** Successful task completion */
+  SUCCESS: 'success',
+  /** Task error */
+  ERROR: 'error',
+  /** Console log forwarding */
+  LOG: 'log',
+  /** Generator yield */
+  YIELD: 'yield',
+  /** Generator return value */
+  RETURN: 'return',
+  /** Generator/stream end */
+  END: 'end',
+} as const;
+
+/** Message type union */
+export type MessageTypeValue = typeof MessageType[keyof typeof MessageType];
+
+/** Log levels for console forwarding */
+export const LogLevel = {
+  LOG: 'log',
+  WARN: 'warn',
+  ERROR: 'error',
+  INFO: 'info',
+  DEBUG: 'debug',
+} as const;
+
+export type LogLevelValue = typeof LogLevel[keyof typeof LogLevel];
+
 /** Message sent to worker */
 export interface WorkerMessage {
   fn: string;
@@ -140,34 +196,60 @@ export interface WorkerMessage {
   context?: Record<string, unknown> | null;
 }
 
-/** Successful result from worker */
-export interface WorkerSuccessResponse {
-  ok: true;
-  value: unknown;
-}
-
-/** Error from worker */
+/** Serialized error for cross-thread transmission */
 export interface SerializedError {
   name: string;
   message: string;
   stack?: string;
+  /** Original function code (only in debug mode) */
+  code?: string;
+}
+
+/** Successful result from worker */
+export interface WorkerSuccessResponse {
+  type: typeof MessageType.SUCCESS;
+  value: unknown;
 }
 
 /** Error result from worker */
 export interface WorkerErrorResponse {
-  ok: false;
+  type: typeof MessageType.ERROR;
   error: SerializedError;
 }
 
 /** Log message from worker */
 export interface WorkerLogMessage {
-  type: 'log';
-  level: 'log' | 'warn' | 'error' | 'info' | 'debug';
+  type: typeof MessageType.LOG;
+  level: LogLevelValue;
   args: string[];
 }
 
-/** Worker response types */
-export type WorkerResponse = WorkerSuccessResponse | WorkerErrorResponse | WorkerLogMessage;
+/** Worker response types (discriminated union) */
+export type WorkerResponse = 
+  | WorkerSuccessResponse 
+  | WorkerErrorResponse 
+  | WorkerLogMessage;
+
+// Legacy support - will be removed in v4
+/** @deprecated Use WorkerSuccessResponse with type field instead */
+export interface LegacySuccessResponse {
+  ok: true;
+  value: unknown;
+}
+
+/** @deprecated Use WorkerErrorResponse with type field instead */
+export interface LegacyErrorResponse {
+  ok: false;
+  error: SerializedError;
+}
+
+/** Combined response type for backwards compatibility */
+export type WorkerResponseCompat = 
+  | WorkerSuccessResponse 
+  | WorkerErrorResponse 
+  | WorkerLogMessage
+  | LegacySuccessResponse
+  | LegacyErrorResponse;
 
 // ============================================================================
 // GENERATOR/STREAM TYPES
@@ -175,28 +257,28 @@ export type WorkerResponse = WorkerSuccessResponse | WorkerErrorResponse | Worke
 
 /** Generator yield message */
 export interface GeneratorYieldMessage {
-  type: 'yield';
+  type: typeof MessageType.YIELD;
   value: unknown;
 }
 
 /** Generator return message */
 export interface GeneratorReturnMessage {
-  type: 'return';
+  type: typeof MessageType.RETURN;
   value: unknown;
 }
 
 /** Generator end message */
 export interface GeneratorEndMessage {
-  type: 'end';
+  type: typeof MessageType.END;
 }
 
 /** Generator error message */
 export interface GeneratorErrorMessage {
-  type: 'error';
+  type: typeof MessageType.ERROR;
   error: SerializedError;
 }
 
-/** All generator message types */
+/** All generator message types (discriminated union) */
 export type GeneratorMessage =
   | GeneratorYieldMessage
   | GeneratorReturnMessage
@@ -327,4 +409,43 @@ export interface FunctionCache {
   clear(): void;
   stats(): FunctionCacheStats;
 }
+
+// ============================================================================
+// LOGGER TYPES
+// ============================================================================
+
+/**
+ * Logger interface - compatible with Pino, Winston, console, etc.
+ * 
+ * @example
+ * // Use default (console)
+ * beeThreads.configure({ logger: console });
+ * 
+ * // Use Pino
+ * import pino from 'pino';
+ * beeThreads.configure({ logger: pino() });
+ * 
+ * // Use Winston
+ * import winston from 'winston';
+ * beeThreads.configure({ logger: winston.createLogger({...}) });
+ * 
+ * // Disable logging
+ * beeThreads.configure({ logger: null });
+ */
+export interface Logger {
+  log(...args: unknown[]): void;
+  warn(...args: unknown[]): void;
+  error(...args: unknown[]): void;
+  info(...args: unknown[]): void;
+  debug(...args: unknown[]): void;
+}
+
+/** Noop logger for disabling logs */
+export const noopLogger: Logger = {
+  log: () => {},
+  warn: () => {},
+  error: () => {},
+  info: () => {},
+  debug: () => {},
+};
 

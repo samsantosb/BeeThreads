@@ -10,9 +10,11 @@
  */
 
 import { Worker } from 'worker_threads';
+import { config } from './config';
 import { requestWorker, releaseWorker } from './pool';
 import { validateFunction } from './validation';
 import { WorkerError } from './errors';
+import { MessageType } from './types';
 import type { GeneratorMessage, WorkerEntry, WorkerLogMessage } from './types';
 
 // ============================================================================
@@ -116,28 +118,39 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
               if (closed) return;
 
               // Handle console logs from worker
-              if (msg.type === 'log') {
+              if (msg.type === MessageType.LOG) {
                 const logMsg = msg as WorkerLogMessage;
-                const logFn = (console as unknown as Record<string, Function>)[logMsg.level] || console.log;
-                logFn('[worker]', ...logMsg.args);
+                // Use configured logger (or skip if null)
+                if (config.logger) {
+                  const logFn = config.logger[logMsg.level as keyof typeof config.logger] as ((...args: unknown[]) => void) | undefined;
+                  if (typeof logFn === 'function') {
+                    logFn('[worker]', ...logMsg.args);
+                  } else {
+                    config.logger.log('[worker]', ...logMsg.args);
+                  }
+                }
                 return;
               }
 
               switch (msg.type) {
-                case 'yield':
+                case MessageType.YIELD:
                   controller.enqueue(msg.value as T);
                   break;
-                case 'return':
+                case MessageType.RETURN:
                   returnValue = msg.value as T;
                   break;
-                case 'end':
+                case MessageType.END:
                   controller.close();
                   cleanup();
                   break;
-                case 'error':
+                case MessageType.ERROR:
                   const err = new WorkerError(msg.error.message);
                   err.name = msg.error.name || 'Error';
                   if (msg.error.stack) err.stack = msg.error.stack;
+                  // Log code dump in debug mode
+                  if (config.debugMode && msg.error.code && config.logger) {
+                    config.logger.error('[bee-threads] Failed generator:\n', msg.error.code);
+                  }
                   controller.error(err);
                   cleanup();
                   break;
