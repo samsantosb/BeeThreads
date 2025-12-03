@@ -198,6 +198,22 @@ const result = await bee((x: number) => x * 2)(21);  // number
 - **No closures** - External variables must be passed via `beeClosures` or `.setContext()`
 - **Serializable only** - Arguments and return values must be serializable (no functions, Symbols, or circular refs with classes)
 
+### Worker Environment
+
+Some global APIs are **not available** inside worker functions:
+
+| API | Status |
+|-----|--------|
+| `require()` | ✅ Works |
+| `Buffer` | ✅ Works |
+| `URL`, `URLSearchParams` | ✅ Works |
+| `TextEncoder/Decoder` | ✅ Works |
+| `crypto` | ✅ Works |
+| `Intl` | ✅ Works |
+| `AbortController` | ❌ Use signal externally |
+| `structuredClone` | ❌ Not available |
+| `performance.now()` | ❌ Use `Date.now()` |
+
 ---
 
 ## Use Cases

@@ -138,9 +138,19 @@ function serializeError(e: unknown): SerializedError {
       stack: err.stack as string | undefined 
     };
     
+    // Preserve Error.cause (ES2022) - serialize recursively
+    if ('cause' in err && err.cause != null) {
+      serialized.cause = serializeError(err.cause);
+    }
+    
+    // Preserve AggregateError.errors - serialize each error
+    if ('errors' in err && Array.isArray(err.errors)) {
+      serialized.errors = err.errors.map(serializeError);
+    }
+    
     // Copy custom properties (like code, statusCode, etc.)
     for (const key of Object.keys(err)) {
-      if (!['name', 'message', 'stack'].includes(key)) {
+      if (!['name', 'message', 'stack', 'cause', 'errors'].includes(key)) {
         const value = err[key];
         if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
           (serialized as unknown as Record<string, unknown>)[key] = value;
@@ -151,8 +161,18 @@ function serializeError(e: unknown): SerializedError {
   else if (e instanceof Error) {
     serialized = { name: e.name, message: e.message, stack: e.stack };
     
+    // Preserve cause
+    if (e.cause != null) {
+      serialized.cause = serializeError(e.cause);
+    }
+    
+    // Preserve AggregateError.errors
+    if (e instanceof AggregateError) {
+      serialized.errors = e.errors.map(serializeError);
+    }
+    
     for (const key of Object.keys(e)) {
-      if (!['name', 'message', 'stack'].includes(key)) {
+      if (!['name', 'message', 'stack', 'cause', 'errors'].includes(key)) {
         const value = (e as unknown as Record<string, unknown>)[key];
         if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
           (serialized as unknown as Record<string, unknown>)[key] = value;

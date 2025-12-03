@@ -137,22 +137,43 @@ export async function executeOnce<T = unknown>(
         return;
       }
 
+      // Helper to reconstruct error from serialized data
+      const reconstructError = (errorData: Record<string, unknown>): WorkerError => {
+        const err = new WorkerError(String(errorData.message || ''));
+        err.name = String(errorData.name || 'Error');
+        if (errorData.stack) err.stack = String(errorData.stack);
+        
+        // Reconstruct cause recursively (ES2022)
+        if (errorData.cause && typeof errorData.cause === 'object') {
+          (err as unknown as Record<string, unknown>).cause = reconstructError(
+            errorData.cause as Record<string, unknown>
+          );
+        }
+        
+        // Reconstruct AggregateError.errors
+        if (Array.isArray(errorData.errors)) {
+          (err as unknown as Record<string, unknown>).errors = errorData.errors.map(
+            (e: unknown) => reconstructError(e as Record<string, unknown>)
+          );
+        }
+        
+        // Copy other custom properties (code, statusCode, etc.)
+        for (const key of Object.keys(errorData)) {
+          if (!['name', 'message', 'stack', '_sourceCode', 'cause', 'errors'].includes(key)) {
+            (err as unknown as Record<string, unknown>)[key] = errorData[key];
+          }
+        }
+        
+        return err;
+      };
+
       // New format: type-based discriminated union
       if ('type' in msg) {
         if (msg.type === MessageType.SUCCESS) {
           settle(true, (msg as WorkerSuccessResponse).value);
         } else if (msg.type === MessageType.ERROR) {
           const errMsg = msg as WorkerErrorResponse;
-          const err = new WorkerError(errMsg.error.message);
-          err.name = errMsg.error.name || 'Error';
-          if (errMsg.error.stack) err.stack = errMsg.error.stack;
-          // Copy custom error properties (code, statusCode, etc.)
-          const errorData = errMsg.error as unknown as Record<string, unknown>;
-          for (const key of Object.keys(errorData)) {
-            if (!['name', 'message', 'stack', '_sourceCode'].includes(key)) {
-              (err as unknown as Record<string, unknown>)[key] = errorData[key];
-            }
-          }
+          const err = reconstructError(errMsg.error as unknown as Record<string, unknown>);
           // Log code dump in debug mode
           if (config.debugMode && errMsg.error._sourceCode && config.logger) {
             config.logger.error('[bee-threads] Failed function:\n', errMsg.error._sourceCode);
@@ -167,16 +188,7 @@ export async function executeOnce<T = unknown>(
         if (msg.ok) {
           settle(true, msg.value);
         } else {
-          const err = new WorkerError(msg.error.message);
-          err.name = msg.error.name || 'Error';
-          if (msg.error.stack) err.stack = msg.error.stack;
-          // Copy custom error properties
-          const errorData = msg.error as unknown as Record<string, unknown>;
-          for (const key of Object.keys(errorData)) {
-            if (!['name', 'message', 'stack'].includes(key)) {
-              (err as unknown as Record<string, unknown>)[key] = errorData[key];
-            }
-          }
+          const err = reconstructError(msg.error as unknown as Record<string, unknown>);
           settle(false, err);
         }
       }

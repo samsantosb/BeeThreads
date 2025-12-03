@@ -161,16 +161,33 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
                   cleanup();
                   break;
                 case MessageType.ERROR:
-                  const err = new WorkerError(msg.error.message);
-                  err.name = msg.error.name || 'Error';
-                  if (msg.error.stack) err.stack = msg.error.stack;
-                  // Copy custom error properties
-                  const errorData = msg.error as unknown as Record<string, unknown>;
-                  for (const key of Object.keys(errorData)) {
-                    if (!['name', 'message', 'stack', '_sourceCode'].includes(key)) {
-                      (err as unknown as Record<string, unknown>)[key] = errorData[key];
+                  // Helper to reconstruct error from serialized data
+                  const reconstructError = (data: Record<string, unknown>): WorkerError => {
+                    const e = new WorkerError(String(data.message || ''));
+                    e.name = String(data.name || 'Error');
+                    if (data.stack) e.stack = String(data.stack);
+                    // Reconstruct cause recursively
+                    if (data.cause && typeof data.cause === 'object') {
+                      (e as unknown as Record<string, unknown>).cause = reconstructError(
+                        data.cause as Record<string, unknown>
+                      );
                     }
-                  }
+                    // Reconstruct AggregateError.errors
+                    if (Array.isArray(data.errors)) {
+                      (e as unknown as Record<string, unknown>).errors = data.errors.map(
+                        (x: unknown) => reconstructError(x as Record<string, unknown>)
+                      );
+                    }
+                    // Copy other custom properties
+                    for (const key of Object.keys(data)) {
+                      if (!['name', 'message', 'stack', '_sourceCode', 'cause', 'errors'].includes(key)) {
+                        (e as unknown as Record<string, unknown>)[key] = data[key];
+                      }
+                    }
+                    return e;
+                  };
+                  
+                  const err = reconstructError(msg.error as unknown as Record<string, unknown>);
                   // Log code dump in debug mode
                   if (config.debugMode && msg.error._sourceCode && config.logger) {
                     config.logger.error('[bee-threads] Failed generator:\n', msg.error._sourceCode);

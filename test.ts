@@ -2074,6 +2074,43 @@ async function runTests(): Promise<void> {
     }
   });
 
+  await test('preserves Error.cause (ES2022)', async () => {
+    try {
+      await beeThreads
+        .run(() => {
+          const cause = new Error('original cause');
+          throw new Error('wrapper error', { cause });
+        })
+        .execute();
+      assert.fail('Should have thrown');
+    } catch (err: unknown) {
+      const error = err as Error & { cause?: Error };
+      assert.ok(error.cause, 'Should have cause property');
+      assert.strictEqual(error.cause.message, 'original cause', 'cause.message should match');
+    }
+  });
+
+  await test('preserves AggregateError.errors', async () => {
+    try {
+      await beeThreads
+        .run(() => {
+          throw new AggregateError([
+            new Error('error 1'),
+            new Error('error 2'),
+          ], 'Multiple errors');
+        })
+        .execute();
+      assert.fail('Should have thrown');
+    } catch (err: unknown) {
+      const error = err as Error & { errors?: Error[] };
+      assert.strictEqual(error.name, 'AggregateError', 'Should be AggregateError');
+      assert.ok(Array.isArray(error.errors), 'Should have errors array');
+      assert.strictEqual(error.errors.length, 2, 'Should have 2 errors');
+      assert.strictEqual(error.errors[0].message, 'error 1');
+      assert.strictEqual(error.errors[1].message, 'error 2');
+    }
+  });
+
   await beeThreads.shutdown();
 
   // ---------- POOL COUNTER STABILITY ----------

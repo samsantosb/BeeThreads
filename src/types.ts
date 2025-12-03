@@ -203,6 +203,10 @@ export interface SerializedError {
   stack?: string;
   /** Original function source code (only in debug mode) */
   _sourceCode?: string;
+  /** Error.cause (ES2022) - serialized recursively */
+  cause?: SerializedError;
+  /** AggregateError.errors - array of serialized errors */
+  errors?: SerializedError[];
   /** Allow custom error properties to be serialized */
   [key: string]: unknown;
 }
