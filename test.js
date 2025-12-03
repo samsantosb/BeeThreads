@@ -1,7 +1,7 @@
 // test.js - bee-threads test suite
 const assert = require('assert');
-const { bee, beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError } = require('./src/index.js');
-const { createLRUCache, createFunctionCache } = require('./src/cache.js');
+const { bee, beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError } = require('./dist/index.js');
+const { createLRUCache, createFunctionCache } = require('./dist/cache.js');
 
 // Test utilities
 let passed = 0;

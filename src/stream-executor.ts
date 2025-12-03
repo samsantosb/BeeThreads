@@ -1,19 +1,37 @@
 /**
  * @fileoverview Stream executor for generator functions.
- * 
+ *
  * Fluent API:
  * - `.usingParams(...args)` - set generator arguments
  * - `.setContext({...})` - inject closure variables
  * - `.execute()` - start streaming
- * 
+ *
  * @module bee-threads/stream-executor
  */
 
-'use strict';
+import { Worker } from 'worker_threads';
+import { requestWorker, releaseWorker } from './pool';
+import { validateFunction } from './validation';
+import { WorkerError } from './errors';
+import type { GeneratorMessage, WorkerEntry, WorkerLogMessage } from './types';
 
-const { requestWorker, releaseWorker } = require('./pool');
-const { validateFunction } = require('./validation');
-const { WorkerError } = require('./errors');
+// ============================================================================
+// STREAM EXECUTOR TYPES
+// ============================================================================
+
+interface StreamExecutorState {
+  fnString: string;
+  context: Record<string, unknown> | null;
+  args: unknown[];
+  transfer: ArrayBuffer[];
+}
+
+export interface StreamExecutor<T = unknown> {
+  usingParams(...params: unknown[]): StreamExecutor<T>;
+  setContext(ctx: Record<string, unknown>): StreamExecutor<T>;
+  transfer(list: ArrayBuffer[]): StreamExecutor<T>;
+  execute(): ReadableStream<T> & { returnValue?: T };
+}
 
 // ============================================================================
 // STREAM EXECUTOR FACTORY
@@ -21,113 +39,72 @@ const { WorkerError } = require('./errors');
 
 /**
  * Creates a stream executor for generators.
- * 
- * @param {Object} state - Executor state
- * @param {string} state.fnString - Serialized generator
- * @param {Object|null} state.context - Closure context
- * @param {Array} state.args - Generator arguments
- * @param {Transferable[]} state.transfer - Zero-copy transferables
- * @returns {StreamExecutor} Chainable executor
  */
-function createStreamExecutor(state) {
+export function createStreamExecutor<T = unknown>(state: StreamExecutorState): StreamExecutor<T> {
   const { fnString, context, args, transfer } = state;
-  
-  const executor = {
+
+  const executor: StreamExecutor<T> = {
     /**
      * Sets generator arguments.
-     * 
-     * @param {...*} params - Arguments
-     * @returns {StreamExecutor} New executor
      */
-    usingParams(...params) {
-      return createStreamExecutor({
+    usingParams(...params: unknown[]): StreamExecutor<T> {
+      return createStreamExecutor<T>({
         fnString,
         context,
         args: [...args, ...params],
         transfer
       });
     },
-    
+
     /**
      * Injects closure variables.
-     * 
-     * @param {Object} ctx - Variables to inject
-     * @returns {StreamExecutor} New executor
-     * 
-     * @example
-     * const multiplier = 2;
-     * beeThreads
-     *   .stream(function* (n) {
-     *     for (let i = 1; i <= n; i++) yield i * multiplier;
-     *   })
-     *   .usingParams(5)
-     *   .setContext({ multiplier })
-     *   .execute()
      */
-    setContext(ctx) {
+    setContext(ctx: Record<string, unknown>): StreamExecutor<T> {
       if (typeof ctx !== 'object' || ctx === null) {
         throw new TypeError('setContext() requires a non-null object');
       }
-      return createStreamExecutor({
+      return createStreamExecutor<T>({
         fnString,
         context: ctx,
         args,
         transfer
       });
     },
-    
+
     /**
      * Specifies transferable objects for zero-copy transfer.
-     * 
-     * ArrayBuffers and other transferables are moved to the worker
-     * without copying, improving performance for large data.
-     * 
-     * **Warning**: Transferred objects become unusable in the main thread.
-     * 
-     * @param {Transferable[]} list - Objects to transfer
-     * @returns {StreamExecutor} New executor with transfer list
-     * 
-     * @example
-     * const buffer = new ArrayBuffer(1024 * 1024);
-     * beeThreads
-     *   .stream(function* (buf) { ... })
-     *   .usingParams(buffer)
-     *   .transfer([buffer])
-     *   .execute()
      */
-    transfer(list) {
-      return createStreamExecutor({
+    transfer(list: ArrayBuffer[]): StreamExecutor<T> {
+      return createStreamExecutor<T>({
         fnString,
         context,
         args,
         transfer: list
       });
     },
-    
+
     /**
      * Starts streaming the generator.
-     * 
-     * @returns {ReadableStream} Stream of yielded values
      */
-    execute() {
-      let streamWorker = null;
-      let workerEntry = null;
+    execute(): ReadableStream<T> & { returnValue?: T } {
+      let streamWorker: Worker | null = null;
+      let workerEntry: WorkerEntry | null = null;
       let isTemporary = false;
       let closed = false;
-      let returnValue = undefined;
+      let returnValue: T | undefined = undefined;
 
-      const cleanup = () => {
+      const cleanup = (): void => {
         if (closed) return;
         closed = true;
         if (streamWorker) {
           streamWorker.removeAllListeners('message');
           streamWorker.removeAllListeners('error');
           streamWorker.removeAllListeners('exit');
-          releaseWorker(workerEntry, streamWorker, isTemporary);
+          releaseWorker(workerEntry, streamWorker, isTemporary, 'generator');
         }
       };
 
-      const readable = new ReadableStream({
+      const readable = new ReadableStream<T>({
         async start(controller) {
           try {
             const workerInfo = await requestWorker('generator');
@@ -135,22 +112,23 @@ function createStreamExecutor(state) {
             streamWorker = workerInfo.worker;
             isTemporary = workerInfo.temporary;
 
-            streamWorker.on('message', msg => {
+            streamWorker.on('message', (msg: GeneratorMessage) => {
               if (closed) return;
-              
+
               // Handle console logs from worker
               if (msg.type === 'log') {
-                const logFn = console[msg.level] || console.log;
-                logFn('[worker]', ...msg.args);
+                const logMsg = msg as WorkerLogMessage;
+                const logFn = (console as unknown as Record<string, Function>)[logMsg.level] || console.log;
+                logFn('[worker]', ...logMsg.args);
                 return;
               }
-              
+
               switch (msg.type) {
                 case 'yield':
-                  controller.enqueue(msg.value);
+                  controller.enqueue(msg.value as T);
                   break;
                 case 'return':
-                  returnValue = msg.value;
+                  returnValue = msg.value as T;
                   break;
                 case 'end':
                   controller.close();
@@ -166,13 +144,13 @@ function createStreamExecutor(state) {
               }
             });
 
-            streamWorker.on('error', err => {
+            streamWorker.on('error', (err: Error) => {
               if (closed) return;
               controller.error(new WorkerError(err.message, err));
               cleanup();
             });
 
-            streamWorker.on('exit', code => {
+            streamWorker.on('exit', (code: number) => {
               if (closed) return;
               if (code !== 0) {
                 controller.error(new WorkerError(`Worker exited with code ${code}`));
@@ -181,29 +159,29 @@ function createStreamExecutor(state) {
             });
 
             const message = { fn: fnString, args, context };
-            transfer?.length > 0 
-              ? streamWorker.postMessage(message, transfer) 
+            transfer.length > 0
+              ? streamWorker.postMessage(message, transfer)
               : streamWorker.postMessage(message);
           } catch (err) {
             controller.error(err);
             cleanup();
           }
         },
-        
+
         cancel() {
           if (streamWorker && !closed) streamWorker.terminate();
           cleanup();
         }
       });
 
-      Object.defineProperty(readable, 'returnValue', { 
-        get: () => returnValue 
+      Object.defineProperty(readable, 'returnValue', {
+        get: () => returnValue
       });
-      
-      return readable;
+
+      return readable as ReadableStream<T> & { returnValue?: T };
     }
   };
-  
+
   return executor;
 }
 
@@ -213,21 +191,10 @@ function createStreamExecutor(state) {
 
 /**
  * Creates a stream runner for a generator.
- * 
- * @param {GeneratorFunction} genFn - Generator function
- * @returns {StreamExecutor} Chainable executor
- * 
- * @example
- * const stream = beeThreads
- *   .stream(function* (n) { for(let i=0; i<n; i++) yield i; })
- *   .usingParams(5)
- *   .execute();
- * 
- * for await (const v of stream) console.log(v);
  */
-function stream(genFn) {
+export function stream<T = unknown>(genFn: Function): StreamExecutor<T> {
   validateFunction(genFn);
-  return createStreamExecutor({
+  return createStreamExecutor<T>({
     fnString: genFn.toString(),
     context: null,
     args: [],
@@ -235,7 +202,3 @@ function stream(genFn) {
   });
 }
 
-module.exports = {
-  createStreamExecutor,
-  stream
-};

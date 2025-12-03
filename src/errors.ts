@@ -1,28 +1,31 @@
 /**
  * @fileoverview Custom error classes for bee-threads library.
- * 
+ *
  * All errors extend AsyncThreadError which provides error codes
  * for programmatic error handling.
- * 
+ *
  * Error Codes:
  * - ERR_ABORTED: Operation was cancelled via AbortSignal
  * - ERR_TIMEOUT: Worker exceeded timeout limit
  * - ERR_QUEUE_FULL: Task queue reached maximum capacity
  * - ERR_WORKER: Error occurred inside the worker thread
  * - ERR_SHUTDOWN: Pool is shutting down
- * 
+ *
  * @module bee-threads/errors
  */
 
-'use strict';
+/** Error codes used by bee-threads errors */
+export type ErrorCode =
+  | 'ERR_ABORTED'
+  | 'ERR_TIMEOUT'
+  | 'ERR_QUEUE_FULL'
+  | 'ERR_WORKER'
+  | 'ERR_SHUTDOWN';
 
 /**
  * Base error class for all bee-threads errors.
  * Provides a consistent error interface with error codes.
- * 
- * @class AsyncThreadError
- * @extends Error
- * 
+ *
  * @example
  * try {
  *   await beeThreads.run(fn)();
@@ -32,18 +35,21 @@
  *   }
  * }
  */
-class AsyncThreadError extends Error {
+export class AsyncThreadError extends Error {
+  /** Machine-readable error code */
+  public readonly code: ErrorCode;
+
   /**
    * Creates a new AsyncThreadError.
-   * 
-   * @param {string} message - Human-readable error message
-   * @param {string} code - Machine-readable error code (e.g., 'ERR_TIMEOUT')
+   *
+   * @param message - Human-readable error message
+   * @param code - Machine-readable error code (e.g., 'ERR_TIMEOUT')
    */
-  constructor(message, code) {
+  constructor(message: string, code: ErrorCode) {
     super(message);
     this.name = 'AsyncThreadError';
     this.code = code;
-    
+
     // Maintains proper stack trace in V8 environments (Node.js)
     if (Error.captureStackTrace) {
       Error.captureStackTrace(this, this.constructor);
@@ -53,18 +59,15 @@ class AsyncThreadError extends Error {
 
 /**
  * Error thrown when an operation is cancelled via AbortSignal.
- * 
+ *
  * This error is thrown when:
  * - AbortController.abort() is called while task is running
  * - An already-aborted signal is passed to a task
- * 
- * @class AbortError
- * @extends AsyncThreadError
- * 
+ *
  * @example
  * const controller = new AbortController();
  * controller.abort();
- * 
+ *
  * try {
  *   await beeThreads.run(fn).signal(controller.signal)();
  * } catch (err) {
@@ -73,13 +76,13 @@ class AsyncThreadError extends Error {
  *   }
  * }
  */
-class AbortError extends AsyncThreadError {
+export class AbortError extends AsyncThreadError {
   /**
    * Creates a new AbortError.
-   * 
-   * @param {string} [message='Operation was aborted'] - Error message
+   *
+   * @param message - Error message (default: 'Operation was aborted')
    */
-  constructor(message = 'Operation was aborted') {
+  constructor(message: string = 'Operation was aborted') {
     super(message, 'ERR_ABORTED');
     this.name = 'AbortError';
   }
@@ -87,14 +90,11 @@ class AbortError extends AsyncThreadError {
 
 /**
  * Error thrown when a worker exceeds its timeout limit.
- * 
+ *
  * This error is thrown when:
  * - A task running with withTimeout() exceeds the time limit
  * - The worker is forcefully terminated due to timeout
- * 
- * @class TimeoutError
- * @extends AsyncThreadError
- * 
+ *
  * @example
  * try {
  *   await beeThreads.withTimeout(1000)(slowFn)();
@@ -104,31 +104,30 @@ class AbortError extends AsyncThreadError {
  *   }
  * }
  */
-class TimeoutError extends AsyncThreadError {
+export class TimeoutError extends AsyncThreadError {
+  /** The timeout value in milliseconds */
+  public readonly timeout: number;
+
   /**
    * Creates a new TimeoutError.
-   * 
-   * @param {number} ms - The timeout value that was exceeded (in milliseconds)
+   *
+   * @param ms - The timeout value that was exceeded (in milliseconds)
    */
-  constructor(ms) {
+  constructor(ms: number) {
     super(`Worker timed out after ${ms}ms`, 'ERR_TIMEOUT');
     this.name = 'TimeoutError';
-    /** @type {number} The timeout value in milliseconds */
     this.timeout = ms;
   }
 }
 
 /**
  * Error thrown when the task queue is full.
- * 
+ *
  * This error is thrown when:
  * - All workers are busy
  * - All temporary workers are in use
  * - The queue has reached maxQueueSize
- * 
- * @class QueueFullError
- * @extends AsyncThreadError
- * 
+ *
  * @example
  * try {
  *   await beeThreads.run(fn)();
@@ -139,31 +138,30 @@ class TimeoutError extends AsyncThreadError {
  *   }
  * }
  */
-class QueueFullError extends AsyncThreadError {
+export class QueueFullError extends AsyncThreadError {
+  /** Maximum queue size configured */
+  public readonly maxSize: number;
+
   /**
    * Creates a new QueueFullError.
-   * 
-   * @param {number} maxSize - The maximum queue size that was reached
+   *
+   * @param maxSize - The maximum queue size that was reached
    */
-  constructor(maxSize) {
+  constructor(maxSize: number) {
     super(`Task queue full (max ${maxSize})`, 'ERR_QUEUE_FULL');
     this.name = 'QueueFullError';
-    /** @type {number} Maximum queue size configured */
     this.maxSize = maxSize;
   }
 }
 
 /**
  * Error thrown when an error occurs inside the worker thread.
- * 
+ *
  * This wraps errors from:
  * - Exceptions thrown by the user's function
  * - Worker process crashes
  * - Unexpected worker exits
- * 
- * @class WorkerError
- * @extends AsyncThreadError
- * 
+ *
  * @example
  * try {
  *   await beeThreads.run(() => { throw new Error('oops'); })();
@@ -176,33 +174,26 @@ class QueueFullError extends AsyncThreadError {
  *   }
  * }
  */
-class WorkerError extends AsyncThreadError {
+export class WorkerError extends AsyncThreadError {
+  /** The original error that caused this (if available) */
+  public declare cause?: Error;
+
   /**
    * Creates a new WorkerError.
-   * 
-   * @param {string} message - Error message from the worker
-   * @param {Error} [originalError] - The original error that caused this
+   *
+   * @param message - Error message from the worker
+   * @param originalError - The original error that caused this
    */
-  constructor(message, originalError) {
+  constructor(message: string, originalError?: Error) {
     super(message, 'ERR_WORKER');
     this.name = 'WorkerError';
-    
+
     // Store original error for debugging
     if (originalError) {
-      /** @type {Error|undefined} The original error that caused this */
       this.cause = originalError;
       // Preserve original stack trace if available
       this.stack = originalError.stack || this.stack;
     }
   }
 }
-
-// Export all error classes
-module.exports = {
-  AsyncThreadError,
-  AbortError,
-  TimeoutError,
-  QueueFullError,
-  WorkerError
-};
 
