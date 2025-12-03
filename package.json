@@ -1,6 +1,6 @@
 {
   "name": "bee-threads",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Handle threading as promises. Run CPU-intensive code in worker threads with a simple fluent API.",
   "main": "src/index.js",
   "types": "src/index.d.ts",
@@ -33,12 +33,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/samsantosb/bee-threads.git"
+    "url": "git+https://github.com/samsantosb/BeeThreads.git"
   },
   "bugs": {
-    "url": "https://github.com/samsantosb/bee-threads/issues"
+    "url": "https://github.com/samsantosb/BeeThreads/issues"
   },
-  "homepage": "https://github.com/samsantosb/bee-threads#readme",
+  "homepage": "https://github.com/samsantosb/BeeThreads#readme",
   "engines": {
     "node": ">=14.18.0"
   }
