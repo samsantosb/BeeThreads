@@ -165,7 +165,10 @@ const metrics = {
   temporaryWorkersCreated: 0,
   activeTemporaryWorkers: 0,
   temporaryWorkerExecutionTime: 0,
-  temporaryWorkerTasks: 0
+  temporaryWorkerTasks: 0,
+  // Affinity metrics
+  affinityHits: 0,
+  affinityMisses: 0
 };
 
 module.exports = {

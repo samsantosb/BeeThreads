@@ -629,6 +629,136 @@ const beeThreads = {
   },
 
   // ──────────────────────────────────────────────────────────────────────────
+  // PARALLEL EXECUTION (Promise-like API)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Executes multiple tasks in parallel, rejecting on first error.
+   * 
+   * Similar to `Promise.all()` - if any task fails, the entire
+   * operation rejects immediately with that error.
+   * 
+   * @function all
+   * @memberof beeThreads
+   * @param {Array<[Function, Array?, Object?]>} tasks - Array of [fn, args?, options?]
+   * @param {Object} [options] - Shared options for all tasks
+   * @param {Object} [options.context] - Shared context for closure injection
+   * @param {number} [options.timeout] - Shared timeout for all tasks
+   * @returns {Promise<Array>} Array of resolved values
+   * @throws {Error} First error from any task
+   * 
+   * @example
+   * // Execute multiple functions in parallel
+   * const [a, b, c] = await beeThreads.all([
+   *   [(x) => x * 2, [21]],
+   *   [(a, b) => a + b, [10, 20]],
+   *   [() => 'hello']
+   * ]);
+   * // a = 42, b = 30, c = 'hello'
+   * 
+   * @example
+   * // With shared context
+   * const TAX = 0.2;
+   * const [price1, price2] = await beeThreads.all([
+   *   [(p) => p * (1 + TAX), [100]],
+   *   [(p) => p * (1 + TAX), [200]],
+   * ], { context: { TAX } });
+   * // price1 = 120, price2 = 240
+   * 
+   * @example
+   * // Throws on first error
+   * try {
+   *   await beeThreads.all([
+   *     [() => 'ok'],
+   *     [() => { throw new Error('fail'); }]
+   *   ]);
+   * } catch (err) {
+   *   console.error(err.message); // 'fail'
+   * }
+   */
+  async all(tasks, options = {}) {
+    if (!Array.isArray(tasks)) {
+      throw new TypeError('all() requires an array of tasks');
+    }
+    
+    const { context: sharedContext = null, timeout: sharedTimeout = null } = options;
+    const { execute } = require('./execution');
+    
+    const promises = tasks.map(task => {
+      const [fn, args = [], taskOptions = {}] = Array.isArray(task) ? task : [task];
+      
+      if (typeof fn !== 'function') {
+        return Promise.reject(new TypeError('Each task must be a function'));
+      }
+      
+      return execute(fn.toString(), args, {
+        ...taskOptions,
+        context: taskOptions.context || sharedContext,
+        timeout: taskOptions.timeout ?? sharedTimeout
+      });
+    });
+    
+    return Promise.all(promises);
+  },
+
+  /**
+   * Executes multiple tasks in parallel, always returning all results.
+   * 
+   * Similar to `Promise.allSettled()` - never throws, always returns
+   * an array of result objects with `status` and `value` or `error`.
+   * 
+   * @function allSettled
+   * @memberof beeThreads
+   * @param {Array<[Function, Array?, Object?]>} tasks - Array of [fn, args?, options?]
+   * @param {Object} [options] - Shared options for all tasks
+   * @param {Object} [options.context] - Shared context for closure injection
+   * @param {number} [options.timeout] - Shared timeout for all tasks
+   * @returns {Promise<Array<{status: 'fulfilled'|'rejected', value?: *, reason?: Error}>>}
+   * 
+   * @example
+   * const results = await beeThreads.allSettled([
+   *   [() => 'success'],
+   *   [() => { throw new Error('fail'); }],
+   *   [() => 42]
+   * ]);
+   * // [
+   * //   { status: 'fulfilled', value: 'success' },
+   * //   { status: 'rejected', reason: Error('fail') },
+   * //   { status: 'fulfilled', value: 42 }
+   * // ]
+   * 
+   * @example
+   * // Process results
+   * const results = await beeThreads.allSettled(tasks);
+   * const successes = results.filter(r => r.status === 'fulfilled');
+   * const failures = results.filter(r => r.status === 'rejected');
+   */
+  async allSettled(tasks, options = {}) {
+    if (!Array.isArray(tasks)) {
+      throw new TypeError('allSettled() requires an array of tasks');
+    }
+    
+    const { context: sharedContext = null, timeout: sharedTimeout = null } = options;
+    const { execute } = require('./execution');
+    
+    const promises = tasks.map(task => {
+      const [fn, args = [], taskOptions = {}] = Array.isArray(task) ? task : [task];
+      
+      if (typeof fn !== 'function') {
+        return Promise.reject(new TypeError('Each task must be a function'));
+      }
+      
+      return execute(fn.toString(), args, {
+        ...taskOptions,
+        context: taskOptions.context || sharedContext,
+        timeout: taskOptions.timeout ?? sharedTimeout
+      });
+    });
+    
+    return Promise.allSettled(promises);
+  },
+
+  // ──────────────────────────────────────────────────────────────────────────
   // MONITORING
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -693,7 +823,8 @@ const beeThreads = {
           avgExecutionTime: e.tasksExecuted > 0 
             ? Math.round(e.totalExecutionTime / e.tasksExecuted) 
             : 0,
-          uptime: Date.now() - e.createdAt
+          uptime: Date.now() - e.createdAt,
+          cachedFunctions: e.functionHashes?.size || 0
         }))
       },
       
@@ -714,7 +845,8 @@ const beeThreads = {
           avgExecutionTime: e.tasksExecuted > 0 
             ? Math.round(e.totalExecutionTime / e.tasksExecuted) 
             : 0,
-          uptime: Date.now() - e.createdAt
+          uptime: Date.now() - e.createdAt,
+          cachedFunctions: e.functionHashes?.size || 0
         }))
       },
       
@@ -727,7 +859,13 @@ const beeThreads = {
         temporaryWorkerTasks: metrics.temporaryWorkerTasks,
         avgTemporaryWorkerTime: metrics.temporaryWorkerTasks > 0
           ? Math.round(metrics.temporaryWorkerExecutionTime / metrics.temporaryWorkerTasks) 
-          : 0
+          : 0,
+        // Affinity metrics (worker reuse optimization)
+        affinityHits: metrics.affinityHits,
+        affinityMisses: metrics.affinityMisses,
+        affinityHitRate: (metrics.affinityHits + metrics.affinityMisses) > 0
+          ? ((metrics.affinityHits / (metrics.affinityHits + metrics.affinityMisses)) * 100).toFixed(1) + '%'
+          : '0%'
       },
       
       config: { ...config }

@@ -48,8 +48,31 @@ const { QueueFullError } = require('./errors');
  * @property {number} createdAt - Creation timestamp
  * @property {number} lastUsedAt - Last activity timestamp
  * @property {NodeJS.Timeout|null} idleTimer - Cleanup timer
+ * @property {Set<string>} functionHashes - Hashes of functions executed (for affinity)
  * @internal
  */
+
+// ============================================================================
+// FUNCTION AFFINITY TRACKING
+// ============================================================================
+
+/**
+ * Creates a fast hash for function affinity tracking.
+ * 
+ * Uses a simple but effective hash algorithm (djb2) that's fast enough
+ * for real-time use while providing reasonable collision resistance.
+ * 
+ * @param {string} str - String to hash
+ * @returns {string} Hash string
+ * @internal
+ */
+function fastHash(str) {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
 
 /**
  * Creates a new worker with tracking metadata.
@@ -86,7 +109,8 @@ function createWorkerEntry(script, poolType) {
     failureCount: 0,
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
-    idleTimer: null
+    idleTimer: null,
+    functionHashes: new Set() // Track functions for affinity
   };
 
   // Auto-remove from pool on worker exit
@@ -164,32 +188,55 @@ async function warmupPool(poolType, count) {
 // ============================================================================
 
 /**
- * Gets an available worker using least-used load balancing.
+ * Gets an available worker using affinity-aware load balancing.
  * 
  * ## Selection Strategy (in order)
  * 
- * 1. **Idle worker with fewest tasks** - Best case, instant reuse
- * 2. **Create new pooled worker** - If under poolSize limit
- * 3. **Create temporary worker** - Overflow handling
- * 4. **Return null** - Must queue the task
+ * 1. **Affinity match** - Idle worker that already has this function cached/optimized
+ * 2. **Idle worker with fewest tasks** - Best case for new functions
+ * 3. **Create new pooled worker** - If under poolSize limit
+ * 4. **Create temporary worker** - Overflow handling
+ * 5. **Return null** - Must queue the task
  * 
- * ## Why Least-Used?
+ * ## Why Affinity?
  * 
- * Picking the worker with fewest executed tasks ensures even
- * distribution. This prevents scenarios where one worker handles
- * all tasks while others sit idle.
+ * V8's TurboFan JIT compiler optimizes hot functions after several calls.
+ * By routing the same function to the same worker, we benefit from:
+ * - Already compiled and cached function (avoids eval)
+ * - V8 optimized machine code (TurboFan)
+ * - Better CPU cache locality
  * 
  * @param {string} poolType - 'normal' or 'generator'
+ * @param {string} [fnHash] - Optional function hash for affinity matching
  * @returns {Object|null} Worker info or null if must queue
  * @internal
  */
-function getWorker(poolType) {
+function getWorker(poolType, fnHash = null) {
   const pool = pools[poolType];
   const script = SCRIPTS[poolType];
   const counters = poolCounters[poolType];
   
   // ─────────────────────────────────────────────────────────────────────────
-  // STRATEGY 1: Find idle worker with fewest tasks
+  // STRATEGY 1: Find idle worker with affinity match (V8 hot path)
+  // ─────────────────────────────────────────────────────────────────────────
+  if (fnHash && counters.idle > 0) {
+    for (const entry of pool) {
+      if (!entry.busy && entry.functionHashes.has(fnHash)) {
+        entry.busy = true;
+        entry.lastUsedAt = Date.now();
+        counters.busy++;
+        counters.idle--;
+        clearTimeout(entry.idleTimer);
+        metrics.affinityHits++;
+        return { entry, worker: entry.worker, temporary: false, affinityHit: true };
+      }
+    }
+    // Affinity miss - function hash provided but no worker had it cached
+    metrics.affinityMisses++;
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // STRATEGY 2: Find idle worker with fewest tasks
   // ─────────────────────────────────────────────────────────────────────────
   if (counters.idle > 0) {
     let selected = null;
@@ -215,7 +262,7 @@ function getWorker(poolType) {
       counters.busy++;
       counters.idle--;
       clearTimeout(selected.idleTimer);
-      return { entry: selected, worker: selected.worker, temporary: false };
+      return { entry: selected, worker: selected.worker, temporary: false, affinityHit: false };
     }
   }
 
@@ -263,8 +310,9 @@ function getWorker(poolType) {
  * 
  * For pooled workers:
  * 1. Update execution statistics
- * 2. If tasks are queued, assign the next one immediately
- * 3. Otherwise, mark idle and schedule cleanup timer
+ * 2. Track function hash for affinity (V8 optimization)
+ * 3. If tasks are queued, assign the next one immediately
+ * 4. Otherwise, mark idle and schedule cleanup timer
  * 
  * For temporary workers:
  * 1. Update metrics
@@ -275,9 +323,10 @@ function getWorker(poolType) {
  * @param {boolean} temporary - Is this a temporary worker?
  * @param {number} [executionTime=0] - Task duration in ms
  * @param {boolean} [failed=false] - Did the task fail?
+ * @param {string} [fnHash=null] - Function hash for affinity tracking
  * @internal
  */
-function releaseWorker(entry, worker, temporary, executionTime = 0, failed = false) {
+function releaseWorker(entry, worker, temporary, executionTime = 0, failed = false, fnHash = null) {
   if (temporary) {
     metrics.activeTemporaryWorkers--;
     metrics.temporaryWorkerTasks++;
@@ -295,6 +344,16 @@ function releaseWorker(entry, worker, temporary, executionTime = 0, failed = fal
   entry.totalExecutionTime += executionTime;
   entry.lastUsedAt = Date.now();
   if (failed) entry.failureCount++;
+  
+  // Track function for affinity (limit to 50 hashes per worker to bound memory)
+  if (fnHash) {
+    if (entry.functionHashes.size >= 50) {
+      // Remove oldest (first) entry when at limit
+      const oldest = entry.functionHashes.values().next().value;
+      entry.functionHashes.delete(oldest);
+    }
+    entry.functionHashes.add(fnHash);
+  }
   
   // Check for queued tasks (priority order: high > normal > low)
   const queue = queues[entry.poolType];
@@ -366,12 +425,13 @@ function dequeueTask(queue) {
  * 
  * @param {string} poolType - 'normal' or 'generator'
  * @param {string} [priority='normal'] - Task priority: 'high', 'normal', 'low'
+ * @param {string} [fnHash=null] - Function hash for affinity matching
  * @returns {Promise<Object>} Resolves with worker info
  * @throws {QueueFullError} If queue is at capacity
  * @internal
  */
-function requestWorker(poolType, priority = 'normal') {
-  const result = getWorker(poolType);
+function requestWorker(poolType, priority = 'normal', fnHash = null) {
+  const result = getWorker(poolType, fnHash);
   if (result) return Promise.resolve(result);
 
   const queue = queues[poolType];
@@ -384,7 +444,7 @@ function requestWorker(poolType, priority = 'normal') {
   const queuePriority = validPriorities.includes(priority) ? priority : 'normal';
 
   return new Promise((resolve, reject) => {
-    queue[queuePriority].push({ resolve, reject, queuedAt: Date.now() });
+    queue[queuePriority].push({ resolve, reject, queuedAt: Date.now(), fnHash });
   });
 }
 
@@ -396,5 +456,6 @@ module.exports = {
   requestWorker,
   warmupPool,
   getQueueLength,
-  dequeueTask
+  dequeueTask,
+  fastHash
 };

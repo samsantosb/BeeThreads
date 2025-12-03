@@ -14,7 +14,7 @@
 'use strict';
 
 const { config, metrics } = require('./config');
-const { requestWorker, releaseWorker } = require('./pool');
+const { requestWorker, releaseWorker, fastHash } = require('./pool');
 const { sleep, calculateBackoff } = require('./utils');
 const { AbortError, TimeoutError, WorkerError } = require('./errors');
 
@@ -51,6 +51,10 @@ async function executeOnce(fn, args, {
   priority = 'normal'
 } = {}) {
   const startTime = Date.now();
+  const fnString = fn.toString();
+  
+  // Compute hash for worker affinity (routes same function to same worker)
+  const fnHash = fastHash(fnString);
   
   // ─────────────────────────────────────────────────────────────────────────
   // Pre-execution checks
@@ -62,11 +66,11 @@ async function executeOnce(fn, args, {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Acquire worker
+  // Acquire worker (with affinity preference)
   // ─────────────────────────────────────────────────────────────────────────
   let workerInfo;
   try {
-    workerInfo = await requestWorker(poolType, priority);
+    workerInfo = await requestWorker(poolType, priority, fnHash);
   } catch (err) {
     if (safe) return { status: 'rejected', error: err };
     throw err;
@@ -93,7 +97,7 @@ async function executeOnce(fn, args, {
       worker.removeListener('message', onMessage);
       worker.removeListener('error', onError);
       worker.removeListener('exit', onExit);
-      releaseWorker(entry, worker, temporary, executionTime, failed);
+      releaseWorker(entry, worker, temporary, executionTime, failed, fnHash);
     };
 
     /**
@@ -169,7 +173,7 @@ async function executeOnce(fn, args, {
     worker.on('error', onError);
     worker.on('exit', onExit);
 
-    const message = { fn: fn.toString(), args, context };
+    const message = { fn: fnString, args, context };
     transfer?.length > 0 ? worker.postMessage(message, transfer) : worker.postMessage(message);
   });
 }

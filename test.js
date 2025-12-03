@@ -1657,6 +1657,128 @@ async function runTests() {
 
   await beeThreads.shutdown();
 
+  // ---------- WORKER AFFINITY ----------
+  section('Worker Affinity');
+
+  await beeThreads.shutdown();
+
+  await test('affinity routes same function to same worker', async () => {
+    beeThreads.configure({ poolSize: 4 });
+    
+    // Run the same function multiple times
+    const fn = (x) => x * 2;
+    for (let i = 0; i < 10; i++) {
+      await beeThreads.run(fn).usingParams(i).execute();
+    }
+    
+    const stats = beeThreads.getPoolStats();
+    // After repeated calls, should have affinity hits
+    assert.ok(stats.metrics.affinityHits >= 0, 'Should track affinity hits');
+    assert.ok(stats.metrics.affinityMisses >= 0, 'Should track affinity misses');
+    assert.ok(typeof stats.metrics.affinityHitRate === 'string', 'Should have affinityHitRate');
+  });
+
+  await test('workers track cached functions count', async () => {
+    const stats = beeThreads.getPoolStats();
+    const workers = stats.normal.workers;
+    assert.ok(workers.length > 0, 'Should have workers');
+    
+    for (const w of workers) {
+      assert.ok(typeof w.cachedFunctions === 'number', 'Worker should have cachedFunctions count');
+    }
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- PARALLEL EXECUTION (Promise-like API) ----------
+  section('beeThreads.all() & allSettled()');
+
+  await test('all() executes multiple tasks in parallel', async () => {
+    const [a, b, c] = await beeThreads.all([
+      [(x) => x * 2, [21]],
+      [(a, b) => a + b, [10, 20]],
+      [() => 'hello']
+    ]);
+    
+    assert.strictEqual(a, 42);
+    assert.strictEqual(b, 30);
+    assert.strictEqual(c, 'hello');
+  });
+
+  await test('all() throws on first error (like Promise.all)', async () => {
+    await assert.rejects(
+      beeThreads.all([
+        [() => 'success'],
+        [() => { throw new Error('all fail'); }],
+        [() => 'never runs']
+      ]),
+      { message: 'all fail' }
+    );
+  });
+
+  await test('all() with shared context', async () => {
+    const TAX = 0.2;
+    const [price1, price2] = await beeThreads.all([
+      [(price) => price * (1 + TAX), [100]],
+      [(price) => price * (1 + TAX), [200]],
+    ], { context: { TAX } });
+    
+    assert.strictEqual(price1, 120);
+    assert.strictEqual(price2, 240);
+  });
+
+  await test('all() throws TypeError for non-array', async () => {
+    await assert.rejects(
+      beeThreads.all('not an array'),
+      TypeError
+    );
+  });
+
+  await test('allSettled() returns all results (like Promise.allSettled)', async () => {
+    const results = await beeThreads.allSettled([
+      [() => 'success'],
+      [() => { throw new Error('fail'); }],
+      [() => 'also success']
+    ]);
+    
+    assert.strictEqual(results.length, 3);
+    assert.strictEqual(results[0].status, 'fulfilled');
+    assert.strictEqual(results[0].value, 'success');
+    assert.strictEqual(results[1].status, 'rejected');
+    assert.strictEqual(results[2].status, 'fulfilled');
+    assert.strictEqual(results[2].value, 'also success');
+  });
+
+  await test('allSettled() with shared context', async () => {
+    const MULT = 10;
+    const results = await beeThreads.allSettled([
+      [(x) => x * MULT, [1]],
+      [(x) => x * MULT, [2]],
+    ], { context: { MULT } });
+    
+    assert.strictEqual(results[0].value, 10);
+    assert.strictEqual(results[1].value, 20);
+  });
+
+  await test('allSettled() with shared timeout', async () => {
+    const results = await beeThreads.allSettled([
+      [() => 'fast'],
+      [() => 'also fast']
+    ], { timeout: 5000 });
+    
+    assert.strictEqual(results[0].status, 'fulfilled');
+    assert.strictEqual(results[1].status, 'fulfilled');
+  });
+
+  await test('allSettled() throws TypeError for non-array', async () => {
+    await assert.rejects(
+      beeThreads.allSettled('not an array'),
+      TypeError
+    );
+  });
+
+  await beeThreads.shutdown();
+
   // ---------- CLEANUP ----------
   section('Cleanup');
 

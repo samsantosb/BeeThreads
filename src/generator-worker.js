@@ -70,11 +70,38 @@ function serializeError(e) {
 }
 
 // ============================================================================
-// FUNCTION SOURCE VALIDATION
+// FUNCTION SOURCE VALIDATION (with caching)
 // ============================================================================
 
 /**
- * Validates that source looks like a valid function/generator.
+ * Pre-compiled regex patterns for function/generator validation.
+ * Compiled once at module load for better performance.
+ * @type {RegExp[]}
+ */
+const VALID_FUNCTION_PATTERNS = [
+  /^function\s*\*?\s*\w*\s*\(/,        // function() or function*()
+  /^async\s+function\s*\*?\s*\w*\s*\(/, // async function() or async function*()
+  /^\(.*\)\s*=>/,                       // (args) =>
+  /^\w+\s*=>/,                          // arg =>
+  /^async\s*\(.*\)\s*=>/,               // async (args) =>
+  /^async\s+\w+\s*=>/,                  // async arg =>
+  /^\(\s*\[/,                           // ([destructured]) =>
+  /^\(\s*\{/,                           // ({destructured}) =>
+];
+
+/**
+ * Cache of validated function sources.
+ * Avoids re-running regex validation on every call.
+ * @type {Set<string>}
+ */
+const validatedSources = new Set();
+const MAX_VALIDATION_CACHE = 200;
+
+/**
+ * Validates that source looks like a valid function/generator (with caching).
+ * 
+ * Once validated, the source is cached so subsequent calls skip
+ * regex matching entirely.
  * 
  * @param {string} src - Function source code
  * @throws {TypeError} If source is invalid
@@ -84,25 +111,25 @@ function validateFunctionSource(src) {
     throw new TypeError('Function source must be a string');
   }
   
+  // Fast path: already validated
+  if (validatedSources.has(src)) {
+    return;
+  }
+  
   const trimmed = src.trim();
   
-  // Include generator patterns (function*)
-  const validPatterns = [
-    /^function\s*\*?\s*\w*\s*\(/,        // function() or function*()
-    /^async\s+function\s*\*?\s*\w*\s*\(/, // async function() or async function*()
-    /^\(.*\)\s*=>/,                       // (args) =>
-    /^\w+\s*=>/,                          // arg =>
-    /^async\s*\(.*\)\s*=>/,               // async (args) =>
-    /^async\s+\w+\s*=>/,                  // async arg =>
-    /^\(\s*\[/,                           // ([destructured]) =>
-    /^\(\s*\{/,                           // ({destructured}) =>
-  ];
-  
-  const isValid = validPatterns.some(pattern => pattern.test(trimmed));
-  
-  if (!isValid) {
+  if (!VALID_FUNCTION_PATTERNS.some(p => p.test(trimmed))) {
     throw new TypeError('Invalid function source - does not appear to be a function');
   }
+  
+  // Cache validation result (with bounded size)
+  if (validatedSources.size >= MAX_VALIDATION_CACHE) {
+    const iterator = validatedSources.values();
+    for (let i = 0; i < 50; i++) {
+      validatedSources.delete(iterator.next().value);
+    }
+  }
+  validatedSources.add(src);
 }
 
 // ============================================================================

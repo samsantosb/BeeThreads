@@ -209,6 +209,8 @@ interface WorkerStats {
   failureCount: number;
   avgExecutionTime: number;
   uptime: number;
+  /** Number of functions cached in this worker for affinity */
+  cachedFunctions: number;
 }
 
 interface PoolTypeStats {
@@ -228,6 +230,12 @@ interface GlobalMetrics {
   activeTemporaryWorkers: number;
   temporaryWorkerTasks: number;
   avgTemporaryWorkerTime: number;
+  /** Number of times a worker with cached function was found (affinity hit) */
+  affinityHits: number;
+  /** Number of times no worker with cached function was found */
+  affinityMisses: number;
+  /** Affinity hit rate as percentage string (e.g. "75.3%") */
+  affinityHitRate: string;
 }
 
 interface PoolStats {
@@ -266,26 +274,25 @@ interface ExecutorBase<
   TParams extends any[] = Unconfigured extends any[] ? any[] : any[]
 > {
   /**
-   * Defines closure variables to inject into the function scope.
+   * Injects external variables into the function scope.
    * 
-   * @template C - Type of closure object
-   * @param closure - Object with variables to inject
-   * @returns Executor with typed closure
+   * @template C - Type of context object
+   * @param context - Object with variables to inject
+   * @returns Executor with typed context
    * 
    * @example
    * const multiplier = 10;
    * const prefix = 'Result: ';
    * 
    * await beeThreads
-   *   .run((x: number, ctx: { multiplier: number; prefix: string }) => 
-   *     ctx.prefix + (x * ctx.multiplier))
-   *   .usingClosure({ multiplier, prefix })
+   *   .run((x) => prefix + (x * multiplier))
+   *   .setContext({ multiplier, prefix })
    *   .usingParams(5)
    *   .execute();
    * // => 'Result: 50'
    */
-  usingClosure<C extends Record<string, any>>(
-    closure: C
+  setContext<C extends Record<string, any>>(
+    context: C
   ): ExecutorWithClosure<TReturn, TSafe, C, TParams>;
 
   /**
@@ -383,10 +390,10 @@ interface ExecutorWithParams<
   TParams extends any[]
 > {
   /**
-   * Sets closure after params are set.
+   * Sets context after params are set.
    */
-  usingClosure<C extends Record<string, any>>(
-    closure: C
+  setContext<C extends Record<string, any>>(
+    context: C
   ): ExecutorComplete<TReturn, TSafe, C, TParams>;
 
   signal(signal: AbortSignal): ExecutorWithParams<TReturn, TSafe, TClosure, TParams>;
@@ -448,20 +455,30 @@ interface ReadableStreamWithReturn<T, R = any> extends ReadableStream<T> {
  */
 interface StreamExecutorBase<TYield, TReturn> {
   /**
-   * Defines closure variables for generator.
+   * Injects context variables for generator.
    */
-  usingClosure<C extends Record<string, any>>(
-    closure: C
+  setContext<C extends Record<string, any>>(
+    context: C
   ): StreamExecutorWithClosure<TYield, TReturn, C>;
+
+  /**
+   * Pre-binds arguments.
+   */
+  usingParams<P extends any[]>(...args: P): StreamExecutorBase<TYield, TReturn>;
 
   /**
    * Direct invocation.
    */
   <A extends any[]>(...args: A): ReadableStreamWithReturn<TYield, TReturn>;
+
+  /**
+   * Execute the stream.
+   */
+  execute(): ReadableStreamWithReturn<TYield, TReturn>;
 }
 
 /**
- * Stream executor with closure configured.
+ * Stream executor with context configured.
  */
 interface StreamExecutorWithClosure<
   TYield,
@@ -469,9 +486,19 @@ interface StreamExecutorWithClosure<
   TClosure extends Record<string, any>
 > {
   /**
+   * Pre-binds arguments.
+   */
+  usingParams<P extends any[]>(...args: P): StreamExecutorWithClosure<TYield, TReturn, TClosure>;
+
+  /**
    * Invoke with arguments.
    */
   <A extends any[]>(...args: A): ReadableStreamWithReturn<TYield, TReturn>;
+
+  /**
+   * Execute the stream.
+   */
+  execute(): ReadableStreamWithReturn<TYield, TReturn>;
 }
 
 // ============================================================================
@@ -482,14 +509,14 @@ interface StreamExecutorWithClosure<
  * Creates an executor from a function.
  * 
  * @example
- * // Simple (no closure)
+ * // Simple
  * const result = await beeThreads.run((a, b) => a + b)(1, 2);
  * 
- * // With closure (type-safe)
+ * // With context (external variables)
  * const factor = 10;
  * const result = await beeThreads
- *   .run((x: number, ctx: { factor: number }) => x * ctx.factor)
- *   .usingClosure({ factor })
+ *   .run((x) => x * factor)
+ *   .setContext({ factor })
  *   .usingParams(5)
  *   .execute();
  */
@@ -511,15 +538,17 @@ interface SafeCurriedRunner {
  * // Simple
  * const stream = beeThreads.stream(function* (n) {
  *   for (let i = 0; i < n; i++) yield i;
- * })(5);
+ * }).usingParams(5).execute();
  * 
- * // With closure
+ * // With context
  * const multiplier = 2;
  * const stream = beeThreads
- *   .stream(function* (n: number, ctx: { multiplier: number }) {
- *     for (let i = 0; i < n; i++) yield i * ctx.multiplier;
+ *   .stream(function* (n) {
+ *     for (let i = 0; i < n; i++) yield i * multiplier;
  *   })
- *   .usingClosure({ multiplier })(5);
+ *   .setContext({ multiplier })
+ *   .usingParams(5)
+ *   .execute();
  */
 interface StreamRunner {
   <TYield, TReturn = void>(
@@ -546,10 +575,11 @@ interface BeeThreads {
    * // Direct execution
    * await beeThreads.run((a, b) => a + b)(1, 2);
    * 
-   * // With type-safe closure
+   * // With context (external variables)
+   * const factor = 10;
    * await beeThreads
-   *   .run((x: number, ctx: { factor: number }) => x * ctx.factor)
-   *   .usingClosure({ factor: 10 })
+   *   .run((x) => x * factor)
+   *   .setContext({ factor })
    *   .usingParams(5)
    *   .execute();
    */
@@ -584,6 +614,51 @@ interface BeeThreads {
    * }
    */
   stream: StreamRunner;
+
+  /**
+   * Executes multiple tasks in parallel, rejecting on first error.
+   * Similar to Promise.all().
+   * 
+   * @example
+   * const [a, b, c] = await beeThreads.all([
+   *   [(x) => x * 2, [21]],
+   *   [(a, b) => a + b, [10, 20]],
+   *   [() => 'hello']
+   * ]);
+   * 
+   * @example
+   * // With shared context
+   * const TAX = 0.2;
+   * const [p1, p2] = await beeThreads.all([
+   *   [(p) => p * (1 + TAX), [100]],
+   *   [(p) => p * (1 + TAX), [200]],
+   * ], { context: { TAX } });
+   */
+  all<T extends any[]>(
+    tasks: Array<[(...args: any[]) => any, any[]?, Record<string, any>?]>,
+    options?: { context?: Record<string, any>; timeout?: number }
+  ): Promise<T>;
+
+  /**
+   * Executes multiple tasks in parallel, always returning all results.
+   * Similar to Promise.allSettled() - never throws.
+   * 
+   * @example
+   * const results = await beeThreads.allSettled([
+   *   [() => 'success'],
+   *   [() => { throw new Error('fail'); }],
+   *   [() => 42]
+   * ]);
+   * // [
+   * //   { status: 'fulfilled', value: 'success' },
+   * //   { status: 'rejected', reason: Error },
+   * //   { status: 'fulfilled', value: 42 }
+   * // ]
+   */
+  allSettled(
+    tasks: Array<[(...args: any[]) => any, any[]?, Record<string, any>?]>,
+    options?: { context?: Record<string, any>; timeout?: number }
+  ): Promise<PromiseSettledResult<any>[]>;
 
   /**
    * Configures pool settings.

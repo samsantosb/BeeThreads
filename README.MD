@@ -200,6 +200,48 @@ for await (const square of stream) {
 
 ---
 
+## Parallel Execution
+
+### `beeThreads.all(tasks)` — Like Promise.all
+
+Executes multiple tasks in parallel. Throws on first error.
+
+```js
+const [a, b, c] = await beeThreads.all([
+  [(x) => x * 2, [21]],
+  [(a, b) => a + b, [10, 20]],
+  [() => 'hello']
+]);
+// a = 42, b = 30, c = 'hello'
+
+// With shared context
+const TAX = 0.2;
+const [p1, p2] = await beeThreads.all([
+  [(price) => price * (1 + TAX), [100]],
+  [(price) => price * (1 + TAX), [200]],
+], { context: { TAX } });
+// p1 = 120, p2 = 240
+```
+
+### `beeThreads.allSettled(tasks)` — Like Promise.allSettled
+
+Never throws. Returns results array with `status` and `value`/`reason`.
+
+```js
+const results = await beeThreads.allSettled([
+  [() => 'success'],
+  [() => { throw new Error('fail'); }],
+  [() => 42]
+]);
+// [
+//   { status: 'fulfilled', value: 'success' },
+//   { status: 'rejected', reason: Error },
+//   { status: 'fulfilled', value: 42 }
+// ]
+```
+
+---
+
 ## Pool
 
 ```js
@@ -265,6 +307,8 @@ const { TimeoutError, AbortError, QueueFullError, WorkerError } = require('bee-t
 
 - **Worker pool** — reuses threads, no cold-start
 - **Load balancing** — distributes tasks across workers
+- **Worker affinity** — routes same function to same worker (V8 JIT optimization)
+- **Function caching** — avoids repeated calls
 - **Priority queue** — critical tasks first
 - **Auto-retry** — handles transient failures
 

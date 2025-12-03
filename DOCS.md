@@ -19,7 +19,8 @@ const { beeThreads, TimeoutError } = require('bee-threads');
 
 **Responsibilities:**
 - Expose `beeThreads.run()`, `safeRun()`, `withTimeout()`, `stream()`
-- Expose `configure()`, `shutdown()`, `getPoolStats()`
+- Expose `beeThreads.all()`, `allSettled()` for parallel execution
+- Expose `configure()`, `shutdown()`, `getPoolStats()`, `warmup()`
 - Re-export error classes
 
 ---
@@ -54,18 +55,20 @@ Avoids iterating the worker array just to count how many are busy. `getWorker()`
 
 | Function | What it does |
 |----------|--------------|
-| `createWorkerEntry()` | Creates worker with metadata (tasksExecuted, failureCount, etc) |
-| `getWorker()` | Gets available worker using least-used balancing |
-| `releaseWorker()` | Returns worker to pool or terminates if temporary |
+| `createWorkerEntry()` | Creates worker with metadata (tasksExecuted, failureCount, functionHashes, etc) |
+| `getWorker(poolType, fnHash)` | Gets available worker using affinity-aware balancing |
+| `releaseWorker()` | Returns worker to pool, tracks function hash for affinity |
 | `requestWorker()` | Async wrapper - returns worker or queues task |
 | `scheduleIdleTimeout()` | Schedules terminating idle worker after X ms |
+| `fastHash(str)` | Creates djb2 hash for function affinity tracking |
 
 **Selection strategy (getWorker):**
 ```
-1. Has idle worker? → Pick the one with fewest tasks executed (load balancing)
-2. Pool not full? → Create new worker
-3. Can create temporary? → Create (will be terminated after use)
-4. Otherwise → Queue task
+1. Has idle worker with affinity match? → Pick it (V8 hot path!)
+2. Has other idle worker? → Pick the one with fewest tasks executed
+3. Pool not full? → Create new worker
+4. Can create temporary? → Create (will be terminated after use)
+5. Otherwise → Queue task
 ```
 
 **Why least-used:**
@@ -165,6 +168,32 @@ class TimeoutError extends AsyncThreadError {
 
 ---
 
+### `src/cache.js` - LRU Cache & Function Cache
+
+**What it does:** Caches compiled functions to avoid repeated eval() calls.
+
+**Why it exists:** Performance optimization. eval() is expensive (~0.3-0.5ms). Cache lookup is ~0.001ms.
+
+**Components:**
+
+| Export | What it does |
+|--------|--------------|
+| `createLRUCache(maxSize)` | Generic LRU cache using Map |
+| `createFunctionCache(maxSize)` | Specialized cache for compiled functions |
+| `createContextKey(context)` | Fast hash for context objects (replaces JSON.stringify) |
+
+**Why LRU:**
+Most recently used functions stay cached. Least used get evicted when cache is full. Optimal for repeated function calls.
+
+**Context Key Optimization:**
+Instead of slow `JSON.stringify(context)`, uses fast djb2 hash algorithm with type markers:
+```js
+// Old: JSON.stringify({ TAX: 0.2, name: "test" }) → '{"TAX":0.2,"name":"test"}'
+// New: createContextKey({ TAX: 0.2, name: "test" }) → 'TAX:number:0.2|name:string:test'
+```
+
+---
+
 ### `src/worker.js` - Worker Script
 
 **What it does:** Code that runs in the worker thread.
@@ -174,13 +203,16 @@ class TimeoutError extends AsyncThreadError {
 **Flow:**
 ```
 1. Receive: { fn: string, args: [], context: {} }
-2. Validate that fn looks like a function (security)
-3. If has context → inject variables into scope
-4. eval() the function code
+2. Validate that fn looks like a function (cached validation)
+3. Get compiled function from cache (or compile + cache)
+4. If has context → inject variables into scope
 5. Apply args (supports curried automatically)
 6. If return is Promise → wait
 7. Send: { ok: true, value } or { ok: false, error }
 ```
+
+**Validation Caching:**
+Function source validation results are cached in a Set. Once a function is validated, subsequent calls skip regex matching entirely.
 
 **applyCurried() - Why it exists:**
 ```js
@@ -304,6 +336,52 @@ Allows reusing partially configured executors. Each `.usingParams()` or `.setCon
 ### Why least-used load balancing?
 Simple and effective. Always picks the worker with fewest executed tasks. Prevents one worker from being overloaded while others sit idle.
 
+### Why worker affinity?
+V8's TurboFan JIT compiler optimizes "hot" functions after several calls. By routing the same function to the same worker:
+1. Function is already compiled and cached (no eval)
+2. V8 has optimized machine code ready
+3. Better CPU cache locality
+
+The pool tracks function hashes per worker via `functionHashes` Set. When selecting a worker, it first looks for one that already executed this function.
+
+---
+
+## Performance Optimizations
+
+### 1. Function Caching (cache.js)
+- LRU cache stores compiled functions
+- Avoids repeated eval() calls (~0.3-0.5ms → ~0.001ms)
+- V8 retains TurboFan optimizations on cached functions
+
+### 2. Worker Affinity (pool.js)
+- Tracks which functions each worker has executed
+- Routes same function to same worker when possible
+- Leverages V8 JIT compilation across calls
+
+### 3. Validation Caching (worker.js)
+- Pre-compiled regex patterns (not created on each call)
+- Validated sources cached in Set
+- Skip validation for known-good functions
+
+### 4. Context Hash (cache.js)
+- Fast djb2 hash instead of JSON.stringify
+- ~10x faster for typical context objects
+- Type-aware key generation
+
+### Metrics
+
+```js
+const stats = beeThreads.getPoolStats();
+
+// Affinity metrics
+stats.metrics.affinityHits      // Times worker had function cached
+stats.metrics.affinityMisses    // Times no affinity match found
+stats.metrics.affinityHitRate   // Hit rate percentage (e.g. "75.3%")
+
+// Per-worker cache info
+stats.normal.workers[0].cachedFunctions  // Functions cached in this worker
+```
+
 ---
 
 ## Adding a New Feature
@@ -337,7 +415,7 @@ npm test
 node test.js
 ```
 
-Current coverage: **100 tests**
+Current coverage: **162 tests**
 
 ---
 

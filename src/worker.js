@@ -82,11 +82,40 @@ function serializeError(e) {
 }
 
 // ============================================================================
-// FUNCTION VALIDATION
+// FUNCTION VALIDATION (with caching)
 // ============================================================================
 
 /**
- * Validates source looks like a valid function.
+ * Pre-compiled regex patterns for function validation.
+ * Compiled once at module load for better performance.
+ * @type {RegExp[]}
+ */
+const VALID_FUNCTION_PATTERNS = [
+  /^function\s*\w*\s*\(/,
+  /^async\s+function\s*\w*\s*\(/,
+  /^\(.*\)\s*=>/,
+  /^\w+\s*=>/,
+  /^async\s*\(.*\)\s*=>/,
+  /^async\s+\w+\s*=>/,
+  /^\(\s*\[/,
+  /^\(\s*\{/,
+];
+
+/**
+ * Cache of validated function sources.
+ * Avoids re-running regex validation on every call.
+ * Uses a Set with bounded size for memory efficiency.
+ * @type {Set<string>}
+ */
+const validatedSources = new Set();
+const MAX_VALIDATION_CACHE = 200;
+
+/**
+ * Validates source looks like a valid function (with caching).
+ * 
+ * Once a function source is validated, it's cached so subsequent
+ * calls skip regex matching entirely. This provides significant
+ * speedup for repeated function executions.
  * 
  * @param {string} src - Function source
  * @throws {TypeError} If invalid
@@ -96,21 +125,26 @@ function validateFunctionSource(src) {
     throw new TypeError('Function source must be a string');
   }
   
-  const trimmed = src.trim();
-  const validPatterns = [
-    /^function\s*\w*\s*\(/,
-    /^async\s+function\s*\w*\s*\(/,
-    /^\(.*\)\s*=>/,
-    /^\w+\s*=>/,
-    /^async\s*\(.*\)\s*=>/,
-    /^async\s+\w+\s*=>/,
-    /^\(\s*\[/,
-    /^\(\s*\{/,
-  ];
+  // Fast path: already validated
+  if (validatedSources.has(src)) {
+    return;
+  }
   
-  if (!validPatterns.some(p => p.test(trimmed))) {
+  const trimmed = src.trim();
+  
+  if (!VALID_FUNCTION_PATTERNS.some(p => p.test(trimmed))) {
     throw new TypeError('Invalid function source');
   }
+  
+  // Cache this validation result (with bounded size)
+  if (validatedSources.size >= MAX_VALIDATION_CACHE) {
+    // Clear oldest entries (Set maintains insertion order)
+    const iterator = validatedSources.values();
+    for (let i = 0; i < 50; i++) { // Remove 50 oldest
+      validatedSources.delete(iterator.next().value);
+    }
+  }
+  validatedSources.add(src);
 }
 
 // ============================================================================
