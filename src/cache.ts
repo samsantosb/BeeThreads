@@ -41,6 +41,9 @@ import type { LRUCache, FunctionCache, FunctionCacheStats } from './types';
 /** Default maximum cache size */
 export const DEFAULT_MAX_SIZE = 100;
 
+/** Default TTL for cache entries in milliseconds */
+export const DEFAULT_TTL = 0; // 0 = no expiration
+
 // ============================================================================
 // SANDBOX POOL (Memory Optimization)
 // ============================================================================
@@ -188,47 +191,82 @@ function createSandbox(context?: Record<string, unknown> | null): Record<string,
  * 2. On set: if full, delete first entry (least recent)
  *
  * @param maxSize - Maximum number of entries
+ * @param ttl - Time-to-live for entries in milliseconds (Default = 0 - no expiration)
  * @returns Cache instance with get, set, has, clear, size methods
  */
-export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE): LRUCache<T> {
+export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: number = DEFAULT_TTL): LRUCache<T> {
   const cache = new Map<string, T>();
+
+  /**
+   *  Periodically check and remove expired entries for cleanup memory.
+   */
+  setInterval(() => {
+    const now = Date.now();
+
+    for (const [key, entry] of cache) {
+      const ttl: number | undefined = (entry as any).__ttl;
+      const createdAt: number | undefined = (entry as any).__createdAt;
+
+      if (ttl && createdAt && (now - createdAt) >= ttl) {
+        cache.delete(key);
+      }
+    }
+  }, 60000 * 5); // Check every 5 minutes
+
+  /**
+   * Checks cache size and evicts oldest entry if needed.
+   */
+  async function checkSize() {
+    if (cache.size <= maxSize) return
+
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) {
+      cache.delete(oldestKey);
+    }
+  }
 
   return {
     /**
      * Gets a value from the cache.
      * If found, moves entry to most-recently-used position.
      */
-    get(key: string): T | undefined {
-      if (!cache.has(key)) {
-        return undefined;
+    get(key: string): T | undefined {     
+      const entry: any = cache.get(key);
+
+      if(entry !== undefined) {
+        const ttl: number | undefined = entry.__ttl;
+        const createdAt: number | undefined = entry.__createdAt;
+
+        // Entry expired. If ttl isnt set, it never expires
+        if (ttl && createdAt && (Date.now() - createdAt) >= ttl) {
+          cache.delete(key);
+          return undefined;
+        }
+
+        // Move to end (most recent) by re-inserting
+        this.set(key, entry, ttl);
       }
 
-      // Move to end (most recent) by re-inserting
-      const value = cache.get(key)!;
-      cache.delete(key);
-      cache.set(key, value);
-
-      return value;
+      return entry as T | undefined;
     },
 
     /**
      * Sets a value in the cache.
      * If cache is full, evicts least-recently-used entry.
      */
-    set(key: string, value: T): void {
-      // If key exists, delete first to update position
-      if (cache.has(key)) {
-        cache.delete(key);
-      }
-      // Evict oldest if at capacity
-      else if (cache.size >= maxSize) {
-        const oldestKey = cache.keys().next().value;
-        if (oldestKey !== undefined) {
-          cache.delete(oldestKey);
-        }
+    set(key: string, value: T, timeToLive: number = ttl): void {
+      // Attach creation timestamp for TTL
+      if(timeToLive){
+        Object.defineProperty(value, '__ttl', { value: timeToLive, enumerable: false, writable: false });
+        Object.defineProperty(value, '__createdAt', { value: Date.now(), enumerable: false, writable: false });
       }
 
+      // Delete first to update position and set again
+      cache.delete(key);
       cache.set(key, value);
+
+      // Check size and evict if needed assynchronously (to avoid blocking)
+      checkSize().catch(() => null);
     },
 
     /**
@@ -256,10 +294,11 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE): LRUCache<
     /**
      * Returns cache statistics.
      */
-    stats(): { size: number; maxSize: number } {
+    stats() {
       return {
         size: cache.size,
-        maxSize
+        maxSize,
+        ttl,
       };
     }
   };

@@ -393,11 +393,11 @@ export type GeneratorWorkerFunction<TArgs extends unknown[] = unknown[], TYield 
 /** LRU Cache interface */
 export interface LRUCache<T> {
   get(key: string): T | undefined;
-  set(key: string, value: T): void;
+  set(key: string, value: T, timeToLive?: number): void;
   has(key: string): boolean;
   clear(): void;
   size(): number;
-  stats(): { size: number; maxSize: number };
+  stats(): { size: number; maxSize: number, ttl: number | undefined };
 }
 
 /** Function cache stats */
