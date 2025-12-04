@@ -208,8 +208,7 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
 
       // Entry expired. If ttl isn't set, it never expires
       if (entry.expiresAt && (Date.now() >= entry.expiresAt)) {
-        this.delete(key, entry);
-        return undefined;
+        return this.delete(key, entry), undefined;
       }
 
       // Move to end (most recent) by re-inserting
