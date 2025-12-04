@@ -395,9 +395,15 @@ export interface LRUCache<T> {
   get(key: string): T | undefined;
   set(key: string, value: T, timeToLive?: number): void;
   has(key: string): boolean;
+  delete(key: string, entry?: LRUCacheEntry<T>): void;
   clear(): void;
   size(): number;
   stats(): { size: number; maxSize: number, ttl: number | undefined };
+}
+export interface LRUCacheEntry<T> {
+  value: T;
+  expiresAt?: number | undefined;
+  timeoutId?: NodeJS.Timeout | undefined;
 }
 
 /** Function cache stats */

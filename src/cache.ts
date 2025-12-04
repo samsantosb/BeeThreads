@@ -36,7 +36,7 @@
  */
 
 import * as vm from 'vm';
-import type { LRUCache, FunctionCache, FunctionCacheStats } from './types';
+import type { LRUCache, FunctionCache, FunctionCacheStats, LRUCacheEntry } from './types';
 
 /** Default maximum cache size */
 export const DEFAULT_MAX_SIZE = 100;
@@ -195,35 +195,7 @@ function createSandbox(context?: Record<string, unknown> | null): Record<string,
  * @returns Cache instance with get, set, has, clear, size methods
  */
 export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: number = DEFAULT_TTL): LRUCache<T> {
-  const cache = new Map<string, T>();
-
-  /**
-   *  Periodically check and remove expired entries for cleanup memory.
-   */
-  setInterval(() => {
-    const now = Date.now();
-
-    for (const [key, entry] of cache) {
-      const ttl: number | undefined = (entry as any).__ttl;
-      const createdAt: number | undefined = (entry as any).__createdAt;
-
-      if (ttl && createdAt && (now - createdAt) >= ttl) {
-        cache.delete(key);
-      }
-    }
-  }, 60000 * 5); // Check every 5 minutes
-
-  /**
-   * Checks cache size and evicts oldest entry if needed.
-   */
-  async function checkSize() {
-    if (cache.size <= maxSize) return
-
-    const oldestKey = cache.keys().next().value;
-    if (oldestKey !== undefined) {
-      cache.delete(oldestKey);
-    }
-  }
+  const cache = new Map<string, LRUCacheEntry<T>>();
 
   return {
     /**
@@ -231,23 +203,22 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
      * If found, moves entry to most-recently-used position.
      */
     get(key: string): T | undefined {     
-      const entry: any = cache.get(key);
+      const entry = cache.get(key);
 
       if(entry !== undefined) {
-        const ttl: number | undefined = entry.__ttl;
-        const createdAt: number | undefined = entry.__createdAt;
+        const { expiresAt } = entry;
 
-        // Entry expired. If ttl isnt set, it never expires
-        if (ttl && createdAt && (Date.now() - createdAt) >= ttl) {
-          cache.delete(key);
+        // Entry expired. If ttl isn't set, it never expires
+        if (expiresAt && (Date.now() >= expiresAt)) {
+          this.delete(key, entry);
           return undefined;
         }
 
         // Move to end (most recent) by re-inserting
-        this.set(key, entry, ttl);
+        this.set(key, entry.value, ttl);
       }
 
-      return entry as T | undefined;
+      return entry?.value;
     },
 
     /**
@@ -255,18 +226,33 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
      * If cache is full, evicts least-recently-used entry.
      */
     set(key: string, value: T, timeToLive: number = ttl): void {
-      // Attach creation timestamp for TTL
-      if(timeToLive){
-        Object.defineProperty(value, '__ttl', { value: timeToLive, enumerable: false, writable: false });
-        Object.defineProperty(value, '__createdAt', { value: Date.now(), enumerable: false, writable: false });
+      let expiresAt: number | undefined;
+      let timeoutId: NodeJS.Timeout | undefined;
+
+      // Schedule expiration timer if TTL is set
+      if (timeToLive > 0) {
+        expiresAt = Date.now() + timeToLive;
+        timeoutId = setTimeout(() => {
+          const entry = cache?.get(key);
+          if (entry?.expiresAt && Date.now() >= entry.expiresAt) {
+            cache.delete(key);
+          }
+        }, timeToLive + 1000); // Extra 1s to ensure expiration
       }
 
       // Delete first to update position and set again
-      cache.delete(key);
-      cache.set(key, value);
+      this.delete(key);
 
-      // Check size and evict if needed assynchronously (to avoid blocking)
-      checkSize().catch(() => null);
+      // Insert new entry with optional expiration
+      cache.set(key, { value, expiresAt, timeoutId});
+
+      // Evict least-recently-used if over max size
+      if (cache.size > maxSize) {
+        const oldestKey = cache.keys().next().value;
+        if (oldestKey !== undefined) {
+          this.delete(oldestKey);
+        }
+      }
     },
 
     /**
@@ -278,9 +264,25 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
     },
 
     /**
+     * Deletes an entry from the cache.
+     * Also cancels any pending expiration timer.
+     */
+    delete(key: string, entry?: LRUCacheEntry<T>) {
+      entry ??= cache.get(key);
+      if (entry?.timeoutId) clearTimeout(entry.timeoutId);
+
+      cache.delete(key);
+    },
+
+    /**
      * Clears all entries from the cache.
+     * Also cancels all pending expiration timers.
      */
     clear(): void {
+      // Cancel all pending timers before clearing
+      for (const entry of cache.values()) {
+        if (entry.timeoutId) clearTimeout(entry.timeoutId);
+      }
       cache.clear();
     },
 
