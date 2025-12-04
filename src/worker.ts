@@ -328,19 +328,20 @@ port.on('message', (message: WorkerMessage) => {
     const ret = applyCurried(fn, args);
 
     // Handle async results
-    if (ret && typeof ret === 'object' && 'then' in ret && typeof (ret as Promise<unknown>).then === 'function') {
-      (ret as Promise<unknown>)
+    if (ret && ret instanceof Promise) {
+      ret
         .then(v => {
-          currentFnSource = null;
           port.postMessage({ type: MessageType.SUCCESS, value: v });
         })
         .catch(e => {
           port.postMessage({ type: MessageType.ERROR, error: serializeError(e) });
+        })
+        .finally(() => {
           currentFnSource = null;
         });
     } else {
-      currentFnSource = null;
       port.postMessage({ type: MessageType.SUCCESS, value: ret });
+      currentFnSource = null;
     }
   } catch (e) {
     port.postMessage({ type: MessageType.ERROR, error: serializeError(e) });
