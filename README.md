@@ -1,44 +1,109 @@
 # 🐝 bee-threads
 
 [![npm](https://img.shields.io/npm/v/bee-threads.svg)](https://www.npmjs.com/package/bee-threads)
+[![npm downloads](https://img.shields.io/npm/dw/bee-threads.svg)](https://www.npmjs.com/package/bee-threads)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg)](https://www.typescriptlang.org/)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](https://www.npmjs.com/package/bee-threads)
 
-> Worker threads with zero boilerplate. Zero dependencies.
+<div align="center">
 
-```js
-// worker.js
-module.exports = (x) => x * 2;
+### ⚡ THE BEST THREADS DX IN NODE.JS ⚡
 
-// main.js
-const { Worker } = require('worker_threads');
-const worker = new Worker('./worker.js');
-worker.postMessage(21);
-worker.on('message', (result) => {
-  console.log(result); // 42
-});
-worker.on('error', handleError);
-worker.on('exit', handleExit);
-// ... 50+ lines of boilerplate ...
+**Parallel programming made simple. Zero boilerplate. Zero dependencies.**
 
+</div>
 
-// bee-threads
-// ==========================================
-const result = await bee((x) => x * 2)(21);  // 42
-```
+---
 
-```bash
-npm install bee-threads
-```
-
-## Quick Start
+## Parallel Programming with bee-threads
 
 ```js
 const { bee } = require('bee-threads');
 
-// Any function runs in a separate thread
+// Run any function in a separate thread
+const result = await bee((x) => x * 2)(21);  // 42
+
+// CPU-intensive? No problem.
 const hash = await bee((pwd) => 
   require('crypto').pbkdf2Sync(pwd, 'salt', 100000, 64, 'sha512').toString('hex')
 )('password123');
+
+// Parallel execution
+const [a, b, c] = await Promise.all([
+  bee((x) => x * 2)(21),
+  bee((x) => x + 1)(41),
+  bee(() => 'hello')()
+]);
+```
+
+That's it. **One line = one thread.**
+
+---
+
+## Native worker_threads vs bee-threads
+
+<table>
+<tr>
+<th>❌ Native worker_threads</th>
+<th>✅ bee-threads</th>
+</tr>
+<tr>
+<td>
+
+```js
+// worker.js (separate file!)
+const { parentPort } = require('worker_threads');
+parentPort.on('message', (x) => {
+  parentPort.postMessage(x * 2);
+});
+
+// main.js
+const { Worker } = require('worker_threads');
+const worker = new Worker('./worker.js');
+
+worker.postMessage(21);
+
+worker.on('message', (result) => {
+  console.log(result); // 42
+});
+
+worker.on('error', (err) => {
+  console.error('Worker error:', err);
+});
+
+worker.on('exit', (code) => {
+  if (code !== 0) {
+    console.error(`Worker stopped: ${code}`);
+  }
+});
+
+// No pooling, no reuse, no caching...
+// 50+ lines of boilerplate
+```
+
+</td>
+<td>
+
+```js
+const { bee } = require('bee-threads');
+
+const result = await bee((x) => x * 2)(21);
+// 42
+
+// ✅ Worker pool (auto-managed)
+// ✅ Function caching (300-500x faster)
+// ✅ Worker affinity (V8 JIT benefits)
+// ✅ Error handling (try/catch works)
+// ✅ TypeScript support
+// ✅ Zero dependencies
+```
+
+</td>
+</tr>
+</table>
+
+```bash
+npm install bee-threads
 ```
 
 ---
@@ -188,19 +253,6 @@ try {
 
 ---
 
-## Parallel Execution
-
-```js
-const [a, b, c] = await Promise.all([
-  bee((x) => x * 2)(21),
-  bee((x) => x + 1)(41),
-  bee(() => 'hello')()
-]);
-// [42, 42, 'hello']
-```
-
----
-
 ## TypeScript
 
 Full type support:
@@ -253,8 +305,8 @@ Some global APIs are **not available** inside worker functions:
 - **Zero dependencies** - Lightweight and secure
 - **Inline functions** - No separate worker files
 - **Worker pool** - Reuses threads, no cold-start
-- **Function caching** - LRU cache, VM.Script optimization
-- **Worker affinity** - Same function → same worker (V8 JIT)
+- **Function caching** - LRU cache, 300-500x faster repeated calls
+- **Worker affinity** - Same function → same worker (V8 JIT optimization)
 - **Full TypeScript** - Complete type definitions
 
 ---
