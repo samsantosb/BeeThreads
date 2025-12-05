@@ -2,7 +2,7 @@
 
 > Complete guide to architecture, internal decisions, and performance optimizations.
 
-**Version:** 0.0.1 (TypeScript)
+**Version:** 3.1.7 (TypeScript)
 
 ---
 
