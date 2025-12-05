@@ -2,7 +2,7 @@
 
 > Complete guide to architecture, internal decisions, and performance optimizations.
 
-**Version:** 3.1.9 (TypeScript)
+**Version:** 3.2.0 (TypeScript)
 
 ---
 
@@ -12,12 +12,13 @@
 2. [Architecture Overview](#architecture-overview)
 3. [File-by-File Breakdown](#file-by-file-breakdown)
 4. [Technical Decisions](#technical-decisions)
-5. [Performance Architecture](#performance-architecture)
-6. [Data Flow](#data-flow)
-7. [Error Handling](#error-handling)
-8. [Memory Management](#memory-management)
-9. [Runtime & Bundler Compatibility](#runtime--bundler-compatibility)
-10. [Contributing Guide](#contributing-guide)
+5. [Security Architecture](#security-architecture)
+6. [Performance Architecture](#performance-architecture)
+7. [Data Flow](#data-flow)
+8. [Error Handling](#error-handling)
+9. [Memory Management](#memory-management)
+10. [Runtime & Bundler Compatibility](#runtime--bundler-compatibility)
+11. [Contributing Guide](#contributing-guide)
 
 ---
 
@@ -590,6 +591,74 @@ calculateBackoff(attempt, baseDelay, maxDelay, factor);
 - V8 optimizes objects with consistent shapes (hidden classes)
 - Adding properties dynamically causes deoptimization
 - Pre-declaring `undefined` properties maintains shape
+
+### 8. Why security by default?
+
+**Decision:** Enable security protections by default with opt-out config.
+
+**Rationale:**
+- Security should be the default state
+- Transparent protections don't affect normal use cases
+- Users who need to disable can do so explicitly
+- Follows principle of least surprise
+
+---
+
+## Security Architecture
+
+### Built-in Protections
+
+| Protection | Type | Default | Configurable |
+|------------|------|---------|--------------|
+| **Function size limit** | DoS prevention | 1MB | `security.maxFunctionSize` |
+| **Prototype pollution block** | Injection prevention | Enabled | `security.blockPrototypePollution` |
+| **vm.Script sandboxing** | Isolation | Always | No |
+| **data: URL workers** | CSP-friendly | Auto-detected | No |
+
+### Function Size Limit
+
+Prevents DoS attacks via extremely large function strings:
+
+```typescript
+// src/validation.ts
+export function validateFunctionSize(fnString: string, maxSize: number): void {
+  const size = Buffer.byteLength(fnString, 'utf8');
+  if (size > maxSize) {
+    throw new RangeError(
+      `Function source exceeds maximum size (${size} bytes > ${maxSize} bytes limit)`
+    );
+  }
+}
+```
+
+### Prototype Pollution Protection
+
+Blocks dangerous keys in context objects:
+
+```typescript
+// src/validation.ts
+export function validateContextSecurity(context: Record<string, unknown>): void {
+  const keys = Object.keys(context);
+  for (const key of keys) {
+    if (key === 'constructor' || key === 'prototype') {
+      throw new TypeError(
+        `Context key "${key}" is not allowed (potential prototype pollution)`
+      );
+    }
+  }
+}
+```
+
+### Configuration
+
+```js
+beeThreads.configure({
+  security: {
+    maxFunctionSize: 2 * 1024 * 1024,  // 2MB (default: 1MB)
+    blockPrototypePollution: false      // Disable if you know what you're doing
+  }
+});
+```
 
 ---
 

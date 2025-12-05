@@ -2892,6 +2892,72 @@ async function runTests(): Promise<void> {
     assert.ok(RUNTIME === 'node' || RUNTIME === 'bun', `Expected node or bun, got: ${RUNTIME}`);
   });
 
+  // ---------- Security Tests ----------
+  console.log('\n📦 Security - Prototype Pollution Protection');
+  
+  await test('blocks constructor in setContext()', async () => {
+    let caught = false;
+    let errorMsg = '';
+    try {
+      await beeThreads.run((x: number) => x)
+        .setContext({ 'constructor': {} } as any)
+        .usingParams(1)
+        .execute();
+    } catch (err: any) {
+      caught = true;
+      errorMsg = err.message || '';
+    }
+    assert.ok(caught, 'Should have thrown an error');
+    assert.ok(errorMsg.includes('constructor'), `Error should mention constructor, got: ${errorMsg}`);
+  });
+  
+  await test('blocks prototype in setContext()', async () => {
+    let caught = false;
+    let errorMsg = '';
+    try {
+      await beeThreads.run((x: number) => x)
+        .setContext({ 'prototype': {} } as any)
+        .usingParams(1)
+        .execute();
+    } catch (err: any) {
+      caught = true;
+      errorMsg = err.message || '';
+    }
+    assert.ok(caught, 'Should have thrown an error');
+    assert.ok(errorMsg.includes('prototype'), `Error should mention prototype, got: ${errorMsg}`);
+  });
+  
+  await test('allows normal context keys', async () => {
+    const result = await beeThreads.run((x: number) => x + MULT)
+      .setContext({ MULT: 10 })
+      .usingParams(5)
+      .execute();
+    assert.strictEqual(result, 15);
+  });
+
+  console.log('\n📦 Security - Function Size Limit');
+  
+  await test('allows normal sized functions', async () => {
+    const result = await bee((x: number) => x * 2)(21);
+    assert.strictEqual(result, 42);
+  });
+  
+  await test('configure() accepts security options', () => {
+    // Just verify it doesn't throw
+    beeThreads.configure({
+      security: {
+        maxFunctionSize: 2 * 1024 * 1024, // 2MB
+        blockPrototypePollution: true
+      }
+    });
+    // Reset to default
+    beeThreads.configure({
+      security: {
+        maxFunctionSize: 1024 * 1024 // 1MB
+      }
+    });
+  });
+
   await beeThreads.shutdown();
 
   // ---------- SUMMARY ----------

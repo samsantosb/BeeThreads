@@ -58,6 +58,23 @@ export interface RetryConfig {
   backoffFactor: number;
 }
 
+/** Security configuration (transparent - doesn't affect normal usage) */
+export interface SecurityConfig {
+  /**
+   * Maximum function source code size in bytes.
+   * Prevents DoS attacks via extremely large functions.
+   * @default 1048576 (1MB)
+   */
+  maxFunctionSize: number;
+  
+  /**
+   * Block prototype pollution attacks.
+   * Prevents __proto__, constructor, prototype keys in context.
+   * @default true
+   */
+  blockPrototypePollution: boolean;
+}
+
 /** Global pool configuration */
 export interface PoolConfig {
   poolSize: number;
@@ -81,6 +98,10 @@ export interface PoolConfig {
    * null = logging disabled
    */
   logger: Logger | null;
+  /**
+   * Security configuration for worker execution.
+   */
+  security: SecurityConfig;
 }
 
 /** User-configurable options (all optional) */
@@ -104,6 +125,10 @@ export interface ConfigureOptions {
    * @default console
    */
   logger?: Logger | null;
+  /**
+   * Security options (transparent - doesn't affect normal usage).
+   */
+  security?: Partial<SecurityConfig>;
 }
 
 // ============================================================================

@@ -40,7 +40,7 @@
 
 import { config } from './config';
 import { execute } from './execution';
-import { validateFunction } from './validation';
+import { validateFunction, validateFunctionSize, validateContextSecurity } from './validation';
 import type { Priority, ExecutionOptions, RetryOptions } from './types';
 
 // ============================================================================
@@ -94,6 +94,12 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       if (typeof context !== 'object' || context === null) {
         throw new TypeError('setContext() requires a non-null object');
       }
+      
+      // Security: Block prototype pollution attacks
+      if (config.security.blockPrototypePollution) {
+        validateContextSecurity(context);
+      }
+      
       // Validate that context doesn't contain non-serializable values
       const contextKeys = Object.keys(context);
       for (let i = 0, len = contextKeys.length; i < len; i++) {
@@ -207,8 +213,14 @@ export function createCurriedRunner(
 ): <T extends AnyFunction>(fn: T) => Executor<ReturnType<T>> {
   return function run<T extends AnyFunction>(fn: T): Executor<ReturnType<T>> {
     validateFunction(fn);
+    
+    const fnString = fn.toString();
+    
+    // Security: Validate function size (DoS prevention)
+    validateFunctionSize(fnString, config.security.maxFunctionSize);
+    
     return createExecutor<ReturnType<T>>({
-      fnString: fn.toString(),
+      fnString,
       options: baseOptions,
       args: []
     });

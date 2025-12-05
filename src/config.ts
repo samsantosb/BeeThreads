@@ -224,7 +224,17 @@ export const config: PoolConfig = {
    * Default: console
    * Set to null to disable logging.
    */
-  logger: console as PoolConfig['logger']
+  logger: console as PoolConfig['logger'],
+
+  /**
+   * Security configuration (transparent - doesn't affect normal usage).
+   */
+  security: {
+    // 1MB max function size - prevents DoS via huge functions
+    maxFunctionSize: 1024 * 1024,
+    // Block prototype pollution attacks
+    blockPrototypePollution: true
+  }
 };
 
 // ============================================================================

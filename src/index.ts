@@ -39,7 +39,7 @@ import { config, pools, poolCounters, queues, metrics, RUNTIME, IS_BUN } from '.
 import { createCurriedRunner, Executor } from './executor';
 import { stream } from './stream-executor';
 import { warmupPool, getQueueLength } from './pool';
-import { validateTimeout, validatePoolSize } from './validation';
+import { validateTimeout, validatePoolSize, validateContextSecurity } from './validation';
 import { deepFreeze } from './utils';
 import {
   AsyncThreadError,
@@ -113,6 +113,14 @@ export function bee<T extends (...args: any[]) => any>(fn: T): CurriedFunction<R
   }
 
   const fnString = fn.toString();
+  
+  // Security: Validate function size (DoS prevention)
+  const fnSize = Buffer.byteLength(fnString, 'utf8');
+  if (fnSize > config.security.maxFunctionSize) {
+    throw new RangeError(
+      `Function source exceeds maximum size (${fnSize} bytes > ${config.security.maxFunctionSize} bytes limit)`
+    );
+  }
 
   type R = ReturnType<T>;
   
@@ -142,6 +150,11 @@ export function bee<T extends (...args: any[]) => any>(fn: T): CurriedFunction<R
       }
 
       if (closuresArg) {
+        // Security: Block prototype pollution in beeClosures
+        if (config.security.blockPrototypePollution) {
+          validateContextSecurity(closuresArg.beeClosures);
+        }
+        
         // Found beeClosures - execute with context (returns Promise, which is PromiseLike)
         const params = paramsFromThisCall || callArgs;
         const allArgs = accumulatedArgs.length > 0 
@@ -287,6 +300,21 @@ export const beeThreads = {
         }
       }
       config.logger = options.logger;
+    }
+    // Security options
+    if (options.security !== undefined) {
+      if (options.security.maxFunctionSize !== undefined) {
+        if (typeof options.security.maxFunctionSize !== 'number' || options.security.maxFunctionSize < 1) {
+          throw new TypeError('security.maxFunctionSize must be a positive number');
+        }
+        config.security.maxFunctionSize = options.security.maxFunctionSize;
+      }
+      if (options.security.blockPrototypePollution !== undefined) {
+        if (typeof options.security.blockPrototypePollution !== 'boolean') {
+          throw new TypeError('security.blockPrototypePollution must be a boolean');
+        }
+        config.security.blockPrototypePollution = options.security.blockPrototypePollution;
+      }
     }
   },
 
