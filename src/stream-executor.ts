@@ -62,11 +62,14 @@ interface StreamExecutorState {
   transfer: ArrayBuffer[];
 }
 
+/** Stream result type - ReadableStream that is also async iterable */
+export type StreamResult<T> = ReadableStream<T> & AsyncIterable<T> & { returnValue?: T };
+
 export interface StreamExecutor<T = unknown> {
   usingParams(...params: unknown[]): StreamExecutor<T>;
   setContext(ctx: Record<string, unknown>): StreamExecutor<T>;
   transfer(list: ArrayBuffer[]): StreamExecutor<T>;
-  execute(): ReadableStream<T> & { returnValue?: T };
+  execute(): StreamResult<T>;
 }
 
 // ============================================================================
@@ -139,7 +142,7 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
     /**
      * Starts streaming the generator.
      */
-    execute(): ReadableStream<T> & { returnValue?: T } {
+    execute(): StreamResult<T> {
       let streamWorker: Worker | null = null;
       let workerEntry: WorkerEntry | null = null;
       let isTemporary = false;
@@ -280,7 +283,8 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
         get: () => returnValue
       });
 
-      return readable as ReadableStream<T> & { returnValue?: T };
+      // ReadableStream is async iterable in Node.js
+      return readable as StreamResult<T>;
     }
   };
 
@@ -291,12 +295,20 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
 // STREAM RUNNER
 // ============================================================================
 
+/** Generator function type */
+type GeneratorFunction<T = unknown> = (...args: any[]) => Generator<T, any, any> | AsyncGenerator<T, any, any>;
+
+/** Extract yield type from generator */
+type YieldType<T> = T extends (...args: any[]) => Generator<infer Y, any, any> ? Y :
+                    T extends (...args: any[]) => AsyncGenerator<infer Y, any, any> ? Y : unknown;
+
 /**
  * Creates a stream runner for a generator.
+ * Type inference extracts yield type from the generator automatically.
  */
-export function stream<T = unknown>(genFn: Function): StreamExecutor<T> {
+export function stream<T extends GeneratorFunction>(genFn: T): StreamExecutor<YieldType<T>> {
   validateFunction(genFn);
-  return createStreamExecutor<T>({
+  return createStreamExecutor<YieldType<T>>({
     fnString: genFn.toString(),
     context: null,
     args: [],

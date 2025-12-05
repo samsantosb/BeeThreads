@@ -35,9 +35,9 @@
 // IMPORTS
 // ============================================================================
 
-import { config, pools, poolCounters, queues, metrics } from './config';
+import { config, pools, poolCounters, queues, metrics, RUNTIME, IS_BUN } from './config';
 import { createCurriedRunner, Executor } from './executor';
-import { stream, StreamExecutor } from './stream-executor';
+import { stream } from './stream-executor';
 import { warmupPool, getQueueLength } from './pool';
 import { validateTimeout, validatePoolSize } from './validation';
 import { deepFreeze } from './utils';
@@ -50,7 +50,7 @@ import {
 } from './errors';
 import { execute } from './execution';
 import { noopLogger } from './types';
-import type { ConfigureOptions, FullPoolStats, PoolType, Priority, Logger } from './types';
+import type { ConfigureOptions, FullPoolStats } from './types';
 
 // ============================================================================
 // SIMPLE CURRIED API
@@ -68,18 +68,26 @@ function hasBeeClosures(obj: unknown): obj is BeeClosuresArg {
 }
 
 /**
- * Curried function type with thenable support
+ * Curried function type with thenable support.
+ * Always returns CurriedFunction<T> for chaining, but is also PromiseLike<T> for await.
+ * This enables: bee(fn)(a)(b)({ beeClosures }) - infinite currying with closures.
  */
-interface CurriedFunction<T> {
-  (...args: unknown[]): CurriedFunction<T> | Promise<T>;
-  then: <TResult1 = T, TResult2 = never>(
+interface CurriedFunction<T> extends PromiseLike<T> {
+  /** Call with more arguments - always returns a new CurriedFunction for chaining */
+  (...args: unknown[]): CurriedFunction<T>;
+  /** PromiseLike - enables await */
+  then<TResult1 = T, TResult2 = never>(
     onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
-  ) => Promise<TResult1 | TResult2>;
-  catch: <TResult = never>(
+  ): Promise<TResult1 | TResult2>;
+  /** Catch errors */
+  catch<TResult = never>(
     onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null
-  ) => Promise<T | TResult>;
-  finally: (onfinally?: (() => void) | null) => Promise<T>;
+  ): Promise<T | TResult>;
+  /** Finally handler */
+  finally(onfinally?: (() => void) | null): Promise<T>;
+  /** Symbol.toStringTag for full Promise compatibility (enables Promise.all, Promise.race, etc.) */
+  readonly [Symbol.toStringTag]: string;
 }
 
 /**
@@ -99,15 +107,19 @@ interface CurriedFunction<T> {
  * const price = await bee(p => p * (1 + TAX))(100)({ beeClosures: { TAX } })
  * // → 120
  */
-export function bee<T = unknown>(fn: Function): CurriedFunction<T> {
+export function bee<T extends (...args: any[]) => any>(fn: T): CurriedFunction<ReturnType<T>> {
   if (typeof fn !== 'function') {
     throw new TypeError(`bee() requires a function, got ${typeof fn}`);
   }
 
   const fnString = fn.toString();
 
-  function createCurry(accumulatedArgs: unknown[]): CurriedFunction<T> {
-    const curry = function (...callArgs: unknown[]): CurriedFunction<T> | Promise<T> {
+  type R = ReturnType<T>;
+  
+  function createCurry(accumulatedArgs: unknown[]): CurriedFunction<R> {
+    // Internal function returns runtime value - TypeScript sees CurriedFunction<R>
+    // which is PromiseLike, so await works. Runtime may return Promise or CurriedFunction.
+    const curry = function (...callArgs: unknown[]): CurriedFunction<R> {
       // Single pass O(n) - find beeClosures and collect params simultaneously
       let closuresArg: BeeClosuresArg | null = null;
       let paramsFromThisCall: unknown[] | null = null;
@@ -130,17 +142,17 @@ export function bee<T = unknown>(fn: Function): CurriedFunction<T> {
       }
 
       if (closuresArg) {
-        // Found beeClosures - execute with context
+        // Found beeClosures - execute with context (returns Promise, which is PromiseLike)
         const params = paramsFromThisCall || callArgs;
         const allArgs = accumulatedArgs.length > 0 
           ? accumulatedArgs.concat(params)
           : params;
-        return execute<T>(fnString, allArgs, { context: closuresArg.beeClosures }) as Promise<T>;
+        return execute<R>(fnString, allArgs, { context: closuresArg.beeClosures }) as unknown as CurriedFunction<R>;
       }
 
       if (callArgs.length === 0) {
-        // Empty call () - execute with accumulated args
-        return execute<T>(fnString, accumulatedArgs, {}) as Promise<T>;
+        // Empty call () - execute with accumulated args (returns Promise, which is PromiseLike)
+        return execute<R>(fnString, accumulatedArgs, {}) as unknown as CurriedFunction<R>;
       }
 
       // Accumulate args and return new curry (thenable for await)
@@ -151,25 +163,33 @@ export function bee<T = unknown>(fn: Function): CurriedFunction<T> {
       );
 
       return nextCurry;
-    } as CurriedFunction<T>;
+    } as CurriedFunction<R>;
 
     // Make thenable so `await bee(fn)(args)` works without extra ()
-    curry.then = <TResult1 = T, TResult2 = never>(
-      onFulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+    curry.then = <TResult1 = R, TResult2 = never>(
+      onFulfilled?: ((value: R) => TResult1 | PromiseLike<TResult1>) | null,
       onRejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
     ): Promise<TResult1 | TResult2> => {
-      return (execute<T>(fnString, accumulatedArgs, {}) as Promise<T>).then(onFulfilled, onRejected);
+      return (execute<R>(fnString, accumulatedArgs, {}) as Promise<R>).then(onFulfilled, onRejected);
     };
 
     curry.catch = <TResult = never>(
       onRejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null
-    ): Promise<T | TResult> => {
-      return (execute<T>(fnString, accumulatedArgs, {}) as Promise<T>).catch(onRejected);
+    ): Promise<R | TResult> => {
+      return (execute<R>(fnString, accumulatedArgs, {}) as Promise<R>).catch(onRejected);
     };
 
-    curry.finally = (onFinally?: (() => void) | null): Promise<T> => {
-      return (execute<T>(fnString, accumulatedArgs, {}) as Promise<T>).finally(onFinally);
+    curry.finally = (onFinally?: (() => void) | null): Promise<R> => {
+      return (execute<R>(fnString, accumulatedArgs, {}) as Promise<R>).finally(onFinally);
     };
+
+    // Symbol.toStringTag for full Promise compatibility (enables Promise.all, etc.)
+    Object.defineProperty(curry, Symbol.toStringTag, {
+      value: 'CurriedFunction',
+      writable: false,
+      enumerable: false,
+      configurable: false
+    });
 
     return curry;
   }
@@ -193,7 +213,7 @@ export const beeThreads = {
   /**
    * Creates an executor with a timeout limit.
    */
-  withTimeout(ms: number): (fn: Function) => Executor {
+  withTimeout(ms: number): <T extends (...args: any[]) => any>(fn: T) => Executor<ReturnType<T>> {
     validateTimeout(ms);
     return createCurriedRunner({ safe: false, timeout: ms });
   },
@@ -442,19 +462,30 @@ export {
   TimeoutError,
   QueueFullError,
   WorkerError,
-  noopLogger
+  noopLogger,
+  // Runtime detection
+  RUNTIME,
+  IS_BUN
 };
 
-// Re-export types
+// Re-export types from types.ts
 export type {
-  Executor,
-  StreamExecutor,
   ConfigureOptions,
   FullPoolStats,
   Priority,
   PoolType,
-  Logger
-};
+  Logger,
+  SafeResult,
+  SafeFulfilled,
+  SafeRejected
+} from './types';
+
+// Re-export Runtime type
+export type { Runtime } from './config';
+
+// Re-export types from other modules
+export type { Executor } from './executor';
+export type { StreamExecutor, StreamResult } from './stream-executor';
 
 // Default export for convenience
 export default beeThreads;

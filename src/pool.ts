@@ -153,7 +153,7 @@ interface GetWorkerResult {
   entry: WorkerEntry | null;
   worker: Worker;
   temporary: boolean;
-  affinityHit?: boolean;
+  affinityHit: boolean;  // Always provided for consistent V8 hidden class
 }
 
 /**

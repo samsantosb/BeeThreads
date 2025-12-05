@@ -410,6 +410,36 @@ export type GeneratorWorkerFunction<TArgs extends unknown[] = unknown[], TYield 
 ) => Generator<TYield, TReturn, unknown>;
 
 // ============================================================================
+// SAFE RESULT TYPES
+// ============================================================================
+
+/** Successful safe result - status discriminates the union */
+export interface SafeFulfilled<T> {
+  status: 'fulfilled';
+  value: T;
+}
+
+/** Failed safe result - status discriminates the union */
+export interface SafeRejected {
+  status: 'rejected';
+  error: Error;
+}
+
+/**
+ * Discriminated union for safe mode results.
+ * Use with `status` property for type narrowing:
+ * 
+ * @example
+ * const result = await execute(fn, args, { safe: true });
+ * if (result.status === 'fulfilled') {
+ *   console.log(result.value); // T
+ * } else {
+ *   console.log(result.error); // Error
+ * }
+ */
+export type SafeResult<T> = SafeFulfilled<T> | SafeRejected;
+
+// ============================================================================
 // CACHE TYPES
 // ============================================================================
 

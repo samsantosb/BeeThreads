@@ -34,34 +34,20 @@
  * @module bee-threads/execution
  */
 
-import { Worker } from 'worker_threads';
 import { config, metrics } from './config';
 import { requestWorker, releaseWorker, fastHash } from './pool';
 import { sleep, calculateBackoff } from './utils';
 import { AbortError, TimeoutError, WorkerError } from './errors';
 import { MessageType } from './types';
 import type {
-  PoolType,
-  Priority,
   ExecutionOptions,
   WorkerResponseCompat,
   WorkerSuccessResponse,
   WorkerErrorResponse,
   WorkerLogMessage,
-  WorkerEntry,
   RetryConfig,
-  LogLevelValue
+  SafeResult
 } from './types';
-
-// ============================================================================
-// RESULT TYPES
-// ============================================================================
-
-interface SafeResult<T> {
-  status: 'fulfilled' | 'rejected';
-  value?: T;
-  error?: Error;
-}
 
 // ============================================================================
 // SINGLE EXECUTION
@@ -340,8 +326,9 @@ export async function execute<T = unknown>(
     }
   }
 
-  // All attempts failed
-  if (safe) return { status: 'rejected', error: lastError };
-  throw lastError;
+  // All attempts failed (lastError is guaranteed to be set if we reach here)
+  const finalError = lastError ?? new Error('All retry attempts failed');
+  if (safe) return { status: 'rejected', error: finalError };
+  throw finalError;
 }
 

@@ -195,15 +195,19 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
 // CURRIED RUNNER FACTORY
 // ============================================================================
 
+/** Any callable function type */
+type AnyFunction = (...args: any[]) => any;
+
 /**
  * Creates a runner function with preset base options.
+ * Type inference extracts ReturnType from the function automatically.
  */
-export function createCurriedRunner<T = unknown>(
+export function createCurriedRunner(
   baseOptions: ExecutionOptions = {}
-): (fn: Function) => Executor<T> {
-  return function run(fn: Function): Executor<T> {
+): <T extends AnyFunction>(fn: T) => Executor<ReturnType<T>> {
+  return function run<T extends AnyFunction>(fn: T): Executor<ReturnType<T>> {
     validateFunction(fn);
-    return createExecutor<T>({
+    return createExecutor<ReturnType<T>>({
       fnString: fn.toString(),
       options: baseOptions,
       args: []

@@ -2,7 +2,7 @@
 
 > Complete guide to architecture, internal decisions, and performance optimizations.
 
-**Version:** 3.1.6 (TypeScript)
+**Version:** 0.0.1 (TypeScript)
 
 ---
 
@@ -16,7 +16,8 @@
 6. [Data Flow](#data-flow)
 7. [Error Handling](#error-handling)
 8. [Memory Management](#memory-management)
-9. [Contributing Guide](#contributing-guide)
+9. [Runtime & Bundler Compatibility](#runtime--bundler-compatibility)
+10. [Contributing Guide](#contributing-guide)
 
 ---
 
@@ -735,6 +736,137 @@ beeThreads.configure({
   }
 });
 ```
+
+---
+
+## Runtime & Bundler Compatibility
+
+### Multi-Runtime Support
+
+bee-threads supports multiple JavaScript runtimes:
+
+| Runtime | Status | Notes |
+|---------|--------|-------|
+| **Node.js** | ✅ Full support | v16+ recommended, uses native `worker_threads` |
+| **Bun** | ✅ Full support | Uses Bun's `worker_threads` compatibility layer |
+| **Deno** | ⚠️ Experimental | Requires `--allow-read` flag, limited testing |
+
+**Runtime detection:**
+
+```typescript
+// src/config.ts
+export function detectRuntime(): Runtime {
+  if (typeof globalThis.Bun !== 'undefined') return 'bun';
+  if (typeof globalThis.Deno !== 'undefined') return 'deno';
+  return 'node';
+}
+
+export const RUNTIME = detectRuntime();
+export const IS_BUN = RUNTIME === 'bun';
+```
+
+### Bundler Compatibility
+
+bee-threads works with **all major bundlers** without any configuration:
+
+| Bundler | Status | Notes |
+|---------|--------|-------|
+| **Webpack** | ✅ Works | No config needed |
+| **Vite** | ✅ Works | No config needed |
+| **Rspack** | ✅ Works | No config needed |
+| **esbuild** | ✅ Works | No config needed |
+| **Rollup** | ✅ Works | No config needed |
+| **Turbopack** | ✅ Works | No config needed |
+
+### How Bundler Compatibility Works
+
+#### The Problem
+
+Traditional `worker_threads` require external `.js` files:
+
+```js
+// ❌ This breaks with bundlers - worker.js won't be included
+const worker = new Worker(path.join(__dirname, 'worker.js'));
+```
+
+Bundlers (Webpack, Vite, etc.) don't automatically include worker files in the bundle.
+
+#### The Solution: Inline Workers
+
+bee-threads auto-detects bundler environments and uses **inline workers** via `data:` URLs:
+
+```typescript
+// src/inline-workers.ts
+export const INLINE_WORKER_CODE = `
+'use strict';
+const { parentPort, workerData } = require('worker_threads');
+// ... complete worker code as string ...
+`;
+
+export function createWorkerDataUrl(code: string): string {
+  const base64 = Buffer.from(code, 'utf-8').toString('base64');
+  return `data:text/javascript;base64,${base64}`;
+}
+```
+
+#### Auto-Detection
+
+```typescript
+// src/config.ts
+function detectBundlerMode(): boolean {
+  // Check 1: Worker file doesn't exist (bundled scenario)
+  const workerPath = path.join(__dirname, 'worker.js');
+  if (!fs.existsSync(workerPath)) return true;
+  
+  // Check 2: Known bundler globals
+  if (
+    typeof __webpack_require__ !== 'undefined' ||
+    typeof __vite_ssr_import__ !== 'undefined' ||
+    typeof __rspack_require__ !== 'undefined'
+  ) return true;
+  
+  return false;
+}
+
+export function getWorkerScript(type: PoolType): string {
+  if (USE_INLINE_WORKERS) {
+    const code = type === 'generator' 
+      ? INLINE_GENERATOR_WORKER_CODE 
+      : INLINE_WORKER_CODE;
+    return createWorkerDataUrl(code);
+  }
+  return path.join(__dirname, 'worker.js');
+}
+```
+
+### Security Considerations
+
+**Why `data:` URLs instead of `eval: true`?**
+
+| Approach | Security | CSP Compatible | Performance |
+|----------|----------|----------------|-------------|
+| `eval: true` | ⚠️ Risky | ❌ Blocked by CSP | ✅ Fast |
+| `data:` URL | ✅ Safe | ✅ Works | ✅ Fast |
+
+The worker code is **static** (not user input), so `data:` URLs are safe and work with Content Security Policy.
+
+### Usage Examples
+
+```bash
+# Node.js (development)
+node app.js
+# Uses: worker.js files from dist/
+
+# Bun (development)
+bun run app.ts
+# Uses: worker.js files from dist/
+
+# Webpack/Vite/etc (production bundle)
+npm run build && node dist/bundle.js
+# Uses: inline workers (data: URLs)
+```
+
+**No configuration needed - it just works!**
 
 ---
 

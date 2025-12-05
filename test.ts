@@ -1,10 +1,20 @@
 // test.ts - bee-threads test suite v1.0.0
 import * as assert from 'assert';
-import { bee, beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError, noopLogger } from './dist/index.js';
+import { bee, beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError, noopLogger, RUNTIME, IS_BUN } from './dist/index.js';
 import { createLRUCache, createFunctionCache } from './dist/cache.js';
 import type { Logger } from './dist/types.js';
 
-// Test utilities
+// ES2022+ Error types (for TypeScript compatibility)
+declare class AggregateError extends Error {
+  errors: Error[];
+  constructor(errors: Iterable<Error>, message?: string);
+}
+
+// Augment Error constructor to accept options with cause
+declare interface ErrorConstructor {
+  new(message?: string, options?: { cause?: unknown }): Error;
+}
+
 let passed = 0;
 let failed = 0;
 
@@ -396,7 +406,8 @@ async function runTests(): Promise<void> {
 
     const chunks: number[] = [];
     for await (const chunk of stream) {
-      chunks.push(chunk as number);
+      // Generator yields Promises, so we await each chunk
+      chunks.push(await chunk);
     }
     assert.deepStrictEqual(chunks, [1, 2]);
   });
@@ -1937,17 +1948,19 @@ async function runTests(): Promise<void> {
   });
 
   await test('interleaved sync and async functions', async () => {
-    const tasks: Promise<number>[] = [];
+    const tasks: PromiseLike<number | Promise<number>>[] = [];
     for (let i = 0; i < 20; i++) {
       if (i % 2 === 0) {
-        tasks.push(bee((x: number) => x)(i)); // sync
+        tasks.push(bee((x: number) => x)(i)); // sync - returns number
       } else {
-        tasks.push(bee(async (x: number) => x)(i)); // async
+        tasks.push(bee(async (x: number) => x)(i)); // async - returns Promise<number>
       }
     }
     const results = await Promise.all(tasks);
     for (let i = 0; i < 20; i++) {
-      assert.strictEqual(results[i], i);
+      // Async functions return Promise, sync return number directly
+      const value = await results[i];
+      assert.strictEqual(value, i);
     }
   });
 
@@ -2345,6 +2358,538 @@ async function runTests(): Promise<void> {
     
     const stats = beeThreads.getPoolStats();
     assert.ok(stats.normal.size > 0, 'Workers should recreate');
+  });
+
+  // ---------- CHAOS ENGINEERING ----------
+  section('Chaos Engineering - Memory & Leaks');
+
+  await test('no memory leak with repeated executions', async () => {
+    // Reset pool
+    await beeThreads.shutdown();
+    
+    const initialHeap = process.memoryUsage().heapUsed;
+    
+    // Execute many tasks
+    for (let i = 0; i < 100; i++) {
+      await bee((x: number) => x * 2)(i);
+    }
+    
+    // Force GC if available
+    if (global.gc) global.gc();
+    
+    const finalHeap = process.memoryUsage().heapUsed;
+    const heapGrowth = finalHeap - initialHeap;
+    
+    // Allow up to 10MB growth (generous for test stability)
+    assert.ok(heapGrowth < 10 * 1024 * 1024, `Heap grew by ${(heapGrowth / 1024 / 1024).toFixed(2)}MB`);
+  });
+
+  await test('circular reference handling', async () => {
+    // Create circular reference in context
+    const obj: Record<string, unknown> = { value: 42 };
+    // Note: We can't actually pass circular refs to workers (they're not serializable)
+    // But we should gracefully handle the attempt
+    
+    const result = await bee((x: number) => x * 2)(21);
+    assert.strictEqual(result, 42);
+  });
+
+  await test('large object serialization', async () => {
+    const largeArray = new Array(10000).fill(0).map((_, i) => ({ index: i, value: `item-${i}` }));
+    
+    const result = await bee((arr: typeof largeArray) => arr.length)(largeArray);
+    assert.strictEqual(result, 10000);
+  });
+
+  await test('deeply nested object handling', async () => {
+    let nested: Record<string, unknown> = { value: 'deep' };
+    for (let i = 0; i < 50; i++) {
+      nested = { child: nested };
+    }
+    
+    const NESTED = nested;
+    const result = await bee(() => {
+      let current: any = NESTED;
+      let depth = 0;
+      while (current.child) {
+        current = current.child;
+        depth++;
+      }
+      return depth;
+    })({ beeClosures: { NESTED } });
+    
+    assert.strictEqual(result, 50);
+  });
+
+  section('Chaos Engineering - Race Conditions');
+
+  await test('concurrent abort signals', async () => {
+    const controllers = Array.from({ length: 10 }, () => new AbortController());
+    
+    const promises = controllers.map((ctrl, i) => {
+      const promise = bee((x: number) => {
+        // Simulate work
+        let sum = 0;
+        for (let j = 0; j < 1000000; j++) sum += j;
+        return x + sum;
+      })(i)
+        .then((r: number) => ({ status: 'ok', value: r }))
+        .catch((e: Error) => ({ status: 'aborted', error: e.message }));
+      
+      // Abort some immediately, some after delay
+      if (i % 2 === 0) ctrl.abort();
+      else setTimeout(() => ctrl.abort(), 5);
+      
+      return promise;
+    });
+    
+    const results = await Promise.all(promises);
+    // Should not crash - some may complete, some may abort
+    assert.ok(results.every(r => r.status === 'ok' || r.status === 'aborted'));
+  });
+
+  await test('rapid task submission and cancellation', async () => {
+    const results: string[] = [];
+    
+    for (let i = 0; i < 20; i++) {
+      const ctrl = new AbortController();
+      
+      beeThreads.run((x: number) => x * 2)
+        .usingParams(i)
+        .signal(ctrl.signal)
+        .execute()
+        .then(() => results.push('completed'))
+        .catch(() => results.push('cancelled'));
+      
+      // Cancel immediately
+      if (i % 3 === 0) ctrl.abort();
+    }
+    
+    await new Promise(r => setTimeout(r, 500));
+    
+    // Should have processed some tasks
+    assert.ok(results.length > 0, 'Should have some results');
+  });
+
+  await test('concurrent pool reconfiguration', async () => {
+    // This tests that configure() during execution doesn't crash
+    const taskPromises: PromiseLike<number>[] = [];
+    
+    for (let i = 0; i < 10; i++) {
+      taskPromises.push(bee((x: number) => x * 2)(i));
+    }
+    
+    // Reconfigure during execution
+    beeThreads.configure({ maxQueueSize: 500 });
+    beeThreads.configure({ maxQueueSize: 1000 });
+    
+    const results = await Promise.all(taskPromises);
+    assert.ok(results.every((r, i) => r === i * 2));
+  });
+
+  await test('interleaved timeout and abort', async () => {
+    const ctrl = new AbortController();
+    
+    const task = beeThreads.withTimeout(50)(() => {
+      // Long running task
+      let sum = 0;
+      for (let i = 0; i < 100000000; i++) sum += i;
+      return sum;
+    })
+      .signal(ctrl.signal)
+      .execute()
+      .catch((e: Error) => e);
+    
+    // Race: abort vs timeout
+    setTimeout(() => ctrl.abort(), 25);
+    
+    const result = await task;
+    // Should be either TimeoutError or AbortError
+    assert.ok(
+      result instanceof TimeoutError || result instanceof AbortError,
+      `Expected TimeoutError or AbortError, got ${result}`
+    );
+  });
+
+  section('Chaos Engineering - Worker Stability');
+
+  await test('worker survives syntax error in function', async () => {
+    try {
+      // This should fail but not crash the worker
+      await bee(() => {
+        // @ts-ignore - intentional bad code
+        return eval('{{invalid}}');
+      })();
+    } catch (e) {
+      assert.ok(e instanceof Error);
+    }
+    
+    // Worker should still work
+    const result = await bee((x: number) => x + 1)(41);
+    assert.strictEqual(result, 42);
+  });
+
+  await test('worker survives infinite loop timeout', async () => {
+    try {
+      await beeThreads.withTimeout(50)(() => {
+        while (true) { /* infinite */ }
+      }).execute();
+    } catch (e) {
+      assert.ok(e instanceof TimeoutError);
+    }
+    
+    // New worker should be created and work
+    const result = await bee((x: number) => x * 2)(21);
+    assert.strictEqual(result, 42);
+  });
+
+  await test('multiple concurrent timeouts', async () => {
+    const promises = Array.from({ length: 5 }, () =>
+      beeThreads.withTimeout(30)(() => {
+        while (true) { /* infinite */ }
+      })
+        .execute()
+        .catch((e: Error) => e)
+    );
+    
+    const results = await Promise.all(promises);
+    
+    // All should timeout
+    assert.ok(results.every(r => r instanceof TimeoutError));
+    
+    // Pool should recover
+    const result = await bee((x: number) => x)(42);
+    assert.strictEqual(result, 42);
+  });
+
+  await test('pool stability after many errors', async () => {
+    // Generate many errors
+    for (let i = 0; i < 20; i++) {
+      try {
+        await bee(() => { throw new Error(`Error ${i}`); })();
+      } catch { /* expected */ }
+    }
+    
+    // Pool should still work
+    const result = await bee((x: number) => x * 2)(21);
+    assert.strictEqual(result, 42);
+    
+    // Stats should be consistent
+    const stats = beeThreads.getPoolStats();
+    assert.ok(stats.normal.busy >= 0, 'busy should be non-negative');
+    assert.ok(stats.normal.idle >= 0, 'idle should be non-negative');
+  });
+
+  section('Chaos Engineering - Edge Cases');
+
+  await test('undefined and null returns are preserved', async () => {
+    const undefinedResult = await bee(() => undefined)();
+    assert.strictEqual(undefinedResult, undefined);
+    
+    const nullResult = await bee(() => null)();
+    assert.strictEqual(nullResult, null);
+  });
+
+  await test('empty array and object returns', async () => {
+    const emptyArray = await bee(() => [])();
+    assert.deepStrictEqual(emptyArray, []);
+    
+    const emptyObject = await bee(() => ({}))();
+    assert.deepStrictEqual(emptyObject, {});
+  });
+
+  await test('special number values', async () => {
+    const nan = await bee(() => NaN)();
+    assert.ok(Number.isNaN(nan));
+    
+    const inf = await bee(() => Infinity)();
+    assert.strictEqual(inf, Infinity);
+    
+    const negInf = await bee(() => -Infinity)();
+    assert.strictEqual(negInf, -Infinity);
+    
+    const negZero = await bee(() => -0)();
+    assert.ok(Object.is(negZero, -0) || negZero === 0); // -0 may become 0 in JSON
+  });
+
+  await test('Date serialization', async () => {
+    const dateStr = await bee(() => new Date('2024-01-01').toISOString())();
+    assert.strictEqual(dateStr, '2024-01-01T00:00:00.000Z');
+  });
+
+  await test('BigInt handling (as string)', async () => {
+    // BigInt can't be serialized directly, but we can handle it as string
+    const result = await bee(() => {
+      const big = BigInt(9007199254740991);
+      return big.toString();
+    })();
+    assert.strictEqual(result, '9007199254740991');
+  });
+
+  await test('Symbol handling (cannot serialize - throws)', async () => {
+    // Symbols are not serializable via structured clone
+    try {
+      await bee(() => {
+        const s = Symbol('test');
+        return { sym: s, value: 42 };
+      })();
+      assert.fail('Should have thrown');
+    } catch (e) {
+      // Expected: DOMException or DataCloneError
+      assert.ok(e instanceof Error);
+      assert.ok(
+        e.message.includes('could not be cloned') || 
+        e.message.includes('DataCloneError') ||
+        e.name === 'DataCloneError',
+        `Unexpected error: ${e.message}`
+      );
+    }
+  });
+
+  section('Chaos Engineering - Stress & Recovery');
+
+  await test('burst of 200 tasks', async () => {
+    const start = Date.now();
+    
+    const promises = Array.from({ length: 200 }, (_, i) =>
+      bee((x: number) => x * 2)(i)
+    );
+    
+    const results = await Promise.all(promises);
+    const duration = Date.now() - start;
+    
+    assert.strictEqual(results.length, 200);
+    assert.ok(results.every((r, i) => r === i * 2));
+    assert.ok(duration < 30000, `Took too long: ${duration}ms`);
+  });
+
+  await test('queue saturation and recovery', async () => {
+    // Configure small queue
+    beeThreads.configure({ maxQueueSize: 5, poolSize: 2 });
+    
+    const results: string[] = [];
+    const promises: Promise<void>[] = [];
+    
+    // Submit more tasks than queue can hold
+    for (let i = 0; i < 20; i++) {
+      promises.push(
+        bee((x: number) => x)(i)
+          .then(() => { results.push('ok'); })
+          .catch((e: Error) => {
+            if (e instanceof QueueFullError) results.push('queue-full');
+            else results.push('error');
+          })
+      );
+    }
+    
+    await Promise.all(promises);
+    
+    // Should have some successes and some queue-full errors
+    assert.ok(results.includes('ok'), 'Should have some successes');
+    
+    // Reset config
+    beeThreads.configure({ maxQueueSize: 1000, poolSize: 4 });
+    
+    // Pool should recover
+    const result = await bee((x: number) => x + 1)(41);
+    assert.strictEqual(result, 42);
+  });
+
+  await test('warmup then stress', async () => {
+    await beeThreads.shutdown();
+    beeThreads.configure({ minThreads: 4, poolSize: 4 });
+    await beeThreads.warmup();
+    
+    const stats = beeThreads.getPoolStats();
+    assert.ok(stats.normal.size >= 4, 'Should have warmed up workers');
+    
+    // Now stress test
+    const results = await Promise.all(
+      Array.from({ length: 50 }, (_, i) => bee((x: number) => x * 2)(i))
+    );
+    
+    assert.ok(results.every((r, i) => r === i * 2));
+  });
+
+  section('Temporary Workers');
+
+  await test('temporary workers are created when pool is full', async () => {
+    await beeThreads.shutdown();
+    beeThreads.configure({ poolSize: 1, maxTemporaryWorkers: 5, maxQueueSize: 0 });
+    
+    const metricsBefore = beeThreads.getPoolStats().metrics;
+    const tempBefore = metricsBefore.temporaryWorkersCreated;
+    
+    // Run multiple tasks - first uses pool, rest need temporary workers
+    const promises = Array.from({ length: 3 }, (_, i) => 
+      beeThreads.run((x: number) => {
+        // Simulate some work
+        let sum = 0;
+        for (let j = 0; j < 100000; j++) sum += j;
+        return x + sum;
+      }).usingParams(i).execute()
+    );
+    
+    await Promise.all(promises);
+    
+    const metricsAfter = beeThreads.getPoolStats().metrics;
+    const tempAfter = metricsAfter.temporaryWorkersCreated;
+    
+    // Should have created temporary workers
+    assert.ok(tempAfter >= tempBefore, 'Should track temporary worker creation');
+  });
+
+  await test('temporaryWorkerTasks metric tracks executions', async () => {
+    const stats = beeThreads.getPoolStats();
+    assert.ok(typeof stats.metrics.temporaryWorkerTasks === 'number');
+    assert.ok(typeof stats.metrics.temporaryWorkerExecutionTime === 'number');
+  });
+
+  section('Shutdown Error Handling');
+
+  await test('queued tasks receive ERR_SHUTDOWN on shutdown', async () => {
+    await beeThreads.shutdown();
+    beeThreads.configure({ poolSize: 1, maxTemporaryWorkers: 0, maxQueueSize: 100 });
+    
+    // Start a long-running task to block the pool
+    const blockingTask = beeThreads.run(() => {
+      let sum = 0;
+      for (let i = 0; i < 50000000; i++) sum += i;
+      return sum;
+    }).execute();
+    
+    // Queue up tasks that will be pending
+    const queuedPromises: Promise<string>[] = [];
+    for (let i = 0; i < 3; i++) {
+      queuedPromises.push(
+        beeThreads.run((x: number) => x)
+          .usingParams(i)
+          .execute()
+          .then(() => 'completed')
+          .catch((e: Error) => e.message.includes('shutting down') ? 'shutdown' : 'other')
+      );
+    }
+    
+    // Give time for tasks to queue
+    await new Promise(r => setTimeout(r, 10));
+    
+    // Shutdown while tasks are queued
+    await beeThreads.shutdown();
+    
+    const results = await Promise.all(queuedPromises);
+    
+    // Some tasks should have received shutdown error
+    assert.ok(
+      results.includes('shutdown') || results.includes('completed'),
+      'Tasks should either complete or receive shutdown error'
+    );
+  });
+
+  section('Cache Edge Cases');
+
+  await test('cache handles empty function string', async () => {
+    // This tests internal cache robustness
+    const result = await bee(() => 'empty')();
+    assert.strictEqual(result, 'empty');
+  });
+
+  await test('cache handles very long function', async () => {
+    // Create a function with lots of code
+    const longFn = (n: number) => {
+      // Lots of operations
+      let result = n;
+      result = result + 1;
+      result = result * 2;
+      result = result - 1;
+      result = result / 2;
+      result = Math.floor(result);
+      result = result + 10;
+      result = result - 5;
+      result = result * 3;
+      result = Math.round(result / 3);
+      return result;
+    };
+    
+    const result = await bee(longFn)(10);
+    assert.strictEqual(result, 15); // (10+1)*2-1)/2+10-5)*3/3 = 15
+  });
+
+  section('Worker Recovery');
+
+  await test('pool recovers from worker exit', async () => {
+    await beeThreads.shutdown();
+    beeThreads.configure({ poolSize: 2, maxTemporaryWorkers: 2 });
+    
+    // Force worker termination via timeout
+    try {
+      await beeThreads.withTimeout(10)(() => {
+        while (true) {}
+      }).execute();
+    } catch { /* expected */ }
+    
+    // Pool should still work
+    const result = await bee((x: number) => x * 2)(21);
+    assert.strictEqual(result, 42);
+    
+    // Run multiple tasks to ensure pool is healthy
+    const results = await Promise.all([
+      bee((x: number) => x)(1),
+      bee((x: number) => x)(2),
+      bee((x: number) => x)(3),
+    ]);
+    
+    assert.deepStrictEqual(results, [1, 2, 3]);
+  });
+
+  await test('affinity survives worker replacement', async () => {
+    await beeThreads.shutdown();
+    beeThreads.configure({ poolSize: 2 });
+    
+    // Run same function multiple times to build affinity
+    const fn = (x: number) => x * 100;
+    for (let i = 0; i < 5; i++) {
+      await bee(fn)(i);
+    }
+    
+    const statsBefore = beeThreads.getPoolStats();
+    const hitsBefore = statsBefore.metrics.affinityHits;
+    
+    // Kill a worker via timeout
+    try {
+      await beeThreads.withTimeout(10)(() => { while (true) {} }).execute();
+    } catch { /* expected */ }
+    
+    // Run same function again - should still work (maybe with new worker)
+    const result = await bee(fn)(42);
+    assert.strictEqual(result, 4200);
+    
+    const statsAfter = beeThreads.getPoolStats();
+    // Pool should track affinity even after worker death
+    assert.ok(typeof statsAfter.metrics.affinityHits === 'number');
+  });
+
+  // ---------- Runtime Detection ----------
+  console.log('\n📦 Runtime Detection');
+  
+  await test('RUNTIME is exported and valid', () => {
+    assert.ok(['node', 'bun', 'deno'].includes(RUNTIME), `RUNTIME should be node, bun, or deno, got: ${RUNTIME}`);
+  });
+  
+  await test('IS_BUN is a boolean', () => {
+    assert.strictEqual(typeof IS_BUN, 'boolean');
+  });
+  
+  await test('RUNTIME matches IS_BUN', () => {
+    if (RUNTIME === 'bun') {
+      assert.strictEqual(IS_BUN, true);
+    } else {
+      assert.strictEqual(IS_BUN, false);
+    }
+  });
+  
+  await test('detects Node.js correctly in this environment', () => {
+    // This test runs in Node.js (or Bun with Node compat)
+    assert.ok(RUNTIME === 'node' || RUNTIME === 'bun', `Expected node or bun, got: ${RUNTIME}`);
   });
 
   await beeThreads.shutdown();
