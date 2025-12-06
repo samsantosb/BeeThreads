@@ -204,21 +204,18 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
      */
     get(key: string): T | undefined {     
       const entry = cache.get(key);
+      if(entry === undefined) return undefined;
 
-      if(entry !== undefined) {
-        const { expiresAt } = entry;
-
-        // Entry expired. If ttl isn't set, it never expires
-        if (expiresAt && (Date.now() >= expiresAt)) {
-          this.delete(key, entry);
-          return undefined;
-        }
-
-        // Move to end (most recent) by re-inserting
-        this.set(key, entry.value, ttl);
+      // Entry expired. If ttl isn't set, it never expires
+      if (entry.expiresAt && (Date.now() >= entry.expiresAt)) {
+        return this.delete(key, entry), undefined;
       }
 
-      return entry?.value;
+      // Move to end (most recent) by re-inserting. Keeping original timeout (entry.timeoutId)
+      cache.delete(key);
+      cache.set(key, entry);
+
+      return entry.value;
     },
 
     /**
@@ -350,7 +347,7 @@ function createContextKey(context: unknown, level: number = 0): string {
   if (context instanceof Date) {
     return String(context.getTime()); // Date as timestamp
   }
-  if (typeof context === 'function') {
+  if (ctxType === 'function') {
     return fastHash(context.toString()); // Hash function source
   }
   if (level >= 10) {
