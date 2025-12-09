@@ -378,52 +378,41 @@ export const beeThreads = {
    * | 100K items | 450ms | 120ms | **3.7x** |
    * | 1M items | 4.2s | 580ms | **7.2x** |
    *
-   * @param fn - Function to apply to each item (map/filter) or reducer (reduce)
+   * @param data - Array or TypedArray to process in parallel
    * @param options - Optional turbo configuration
    * @returns TurboExecutor with map, mapWithStats, filter, reduce methods
    *
    * @example
    * ```typescript
    * // Map - transform each item in parallel
-   * const squares = await beeThreads.turbo((x) => x * x).map(numbers);
+   * const squares = await beeThreads.turbo(numbers).map(x => x * x)
    *
    * // TypedArray - uses SharedArrayBuffer (zero-copy)
-   * const data = new Float64Array(1_000_000);
-   * const processed = await beeThreads.turbo((x) => Math.sqrt(x)).map(data);
+   * const data = new Float64Array(1_000_000)
+   * const processed = await beeThreads.turbo(data).map(x => Math.sqrt(x))
    *
    * // Filter - keep items matching predicate
-   * const evens = await beeThreads.turbo((x) => x % 2 === 0).filter(numbers);
+   * const evens = await beeThreads.turbo(numbers).filter(x => x % 2 === 0)
    *
    * // Reduce - parallel tree reduction
-   * const sum = await beeThreads.turbo((a, b) => a + b).reduce(numbers, 0);
+   * const sum = await beeThreads.turbo(numbers).reduce((a, b) => a + b, 0)
    *
    * // With stats
-   * const { data, stats } = await beeThreads
-   *   .turbo((x) => heavyMath(x))
-   *   .mapWithStats(largeArray);
-   * console.log(`Speedup: ${stats.speedupRatio}`); // "7.2x"
+   * const { data, stats } = await beeThreads.turbo(largeArray).mapWithStats(x => heavyMath(x))
+   * console.log(`Speedup: ${stats.speedupRatio}`) // "7.2x"
    *
    * // With options
    * const results = await beeThreads
-   *   .turbo((x) => x * multiplier, { context: { multiplier: 2 }, workers: 4 })
-   *   .map(data);
+   *   .turbo(data, { context: { multiplier: 2 }, workers: 4 })
+   *   .map(x => x * multiplier)
    * ```
    */
-  turbo<TInput, TOutput>(
-    fn: (item: TInput, index: number) => TOutput,
+  turbo<TItem>(
+    data: TItem[],
     options?: TurboOptions
-  ): TurboExecutor<TOutput, TInput> {
-    if (typeof fn !== 'function') {
-      throw new TypeError(`turbo() requires a function, got ${typeof fn}`);
-    }
-
-    // Security: Validate function size
-    const fnString = fn.toString();
-    const fnSize = Buffer.byteLength(fnString, 'utf8');
-    if (fnSize > config.security.maxFunctionSize) {
-      throw new RangeError(
-        `Function source exceeds maximum size (${fnSize} bytes > ${config.security.maxFunctionSize} bytes limit)`
-      );
+  ): TurboExecutor<TItem> {
+    if (!Array.isArray(data) && !ArrayBuffer.isView(data)) {
+      throw new TypeError(`turbo() requires an array or TypedArray, got ${typeof data}`);
     }
 
     // Security: Validate context if provided
@@ -431,7 +420,7 @@ export const beeThreads = {
       validateContextSecurity(options.context);
     }
 
-    return createTurboExecutor<TOutput, TInput>(fn, options || {});
+    return createTurboExecutor<TItem>(data, options || {});
   },
 
   /**

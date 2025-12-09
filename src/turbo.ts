@@ -1,68 +1,16 @@
 /**
- * @fileoverview beeThreads.turbo - Parallel Array Processing with SharedArrayBuffer
- *
- * ## Why This File Exists
- *
- * When processing large arrays, using a single worker is inefficient. `turbo` mode
- * distributes work across ALL available workers using SharedArrayBuffer for zero-copy
- * data transfer, achieving near-linear speedup on multi-core systems.
- *
- * ## Architecture
- *
- * CRITICAL: Turbo mode is COMPLETELY ISOLATED from bee()/beeThreads normal mode:
- * - Uses the same worker pool BUT different message types
- * - Normal messages: { type: MessageType.EXECUTE, fn, args, context }
- * - Turbo messages: { type: 'turbo_map'|'turbo_filter'|'turbo_reduce', ... }
- * - Worker.ts handles them in separate code paths
- * - NO shared state between turbo and normal executions
- *
- * ## Error Handling
- *
- * Uses FAIL-FAST strategy:
- * - If ANY worker fails, ALL other workers are signaled to abort
- * - Error is immediately propagated to caller as rejected Promise
- * - Resources (workers) are properly cleaned up
- * - No zombie workers left running
- *
- * ## How It Works
- *
+ * @fileoverview beeThreads.turbo - Parallel Array Processing
+ * 
+ * V8-OPTIMIZED: Raw for loops, monomorphic shapes, zero hidden class transitions
+ * 
+ * @example
+ * ```typescript
+ * // New syntax - array first, function in method
+ * const squares = await beeThreads.turbo(numbers).map(x => x * x)
+ * const evens = await beeThreads.turbo(numbers).filter(x => x % 2 === 0)
+ * const sum = await beeThreads.turbo(numbers).reduce((a, b) => a + b, 0)
  * ```
- * beeThreads.turbo(fn).map(array)
- *        │
- *        ▼
- * ┌─────────────────────────────────────┐
- * │ 1. Analyze: size, type, worth it?   │
- * │ 2. Create SharedArrayBuffer         │
- * │ 3. Split array into N chunks        │
- * │ 4. Dispatch to ALL workers (high)   │
- * │ 5. Workers process in parallel      │
- * │ 6. On ANY error: ABORT ALL          │
- * │ 7. Merge results                    │
- * └─────────────────────────────────────┘
- *        │
- *        ▼
- *   [results array] OR throw Error
- * ```
- *
- * ## Performance Characteristics
- *
- * | Array Size | Single Worker | Turbo (8 cores) | Speedup |
- * |------------|---------------|-----------------|---------|
- * | 10K items  | 45ms          | 20ms            | 2.2x    |
- * | 100K items | 450ms         | 120ms           | 3.7x    |
- * | 1M items   | 4.2s          | 580ms           | 7.2x    |
- *
- * ## When to Use
- *
- * ✅ Large arrays (10K+ items)
- * ✅ TypedArrays (Float64Array, Int32Array, etc.) - zero-copy
- * ✅ CPU-intensive per-item operations
- * ✅ Independent operations (no dependencies between items)
- *
- * ❌ Small arrays (<10K items) - overhead exceeds benefit
- * ❌ Operations with side effects
- * ❌ Operations that depend on previous results (use reduce)
- *
+ * 
  * @module bee-threads/turbo
  */
 
@@ -70,64 +18,38 @@ import { config } from './config';
 import { requestWorker, releaseWorker, fastHash } from './pool';
 
 // ============================================================================
-// CONSTANTS
+// CONSTANTS (V8: const for inline caching)
 // ============================================================================
 
-/** Minimum array size to benefit from turbo mode */
 const TURBO_THRESHOLD = 10_000;
-
-/** Minimum items per worker to be efficient */
 const MIN_ITEMS_PER_WORKER = 1_000;
 
 // ============================================================================
 // TYPES
 // ============================================================================
 
-/**
- * Options for turbo execution.
- */
 export interface TurboOptions {
-  /** Number of workers to use (default: all available) */
   workers?: number;
-  /** Items per chunk (default: auto-calculated) */
   chunkSize?: number;
-  /** Force turbo even for small arrays (default: false) */
   force?: boolean;
-  /** Context variables to inject */
   context?: Record<string, unknown>;
 }
 
-/**
- * Statistics from turbo execution.
- */
 export interface TurboStats {
-  /** Total items processed */
   totalItems: number;
-  /** Number of workers used */
   workersUsed: number;
-  /** Items per worker */
   itemsPerWorker: number;
-  /** Whether SharedArrayBuffer was used */
   usedSharedMemory: boolean;
-  /** Total execution time in ms */
   executionTime: number;
-  /** Speedup ratio vs estimated single-thread */
   speedupRatio: string;
 }
 
-/**
- * Result of turbo execution with stats.
- */
 export interface TurboResult<T> {
-  /** The processed results */
   data: T[];
-  /** Execution statistics */
   stats: TurboStats;
 }
 
-/**
- * Message sent to turbo worker.
- */
+// Monomorphic message shape - all properties declared upfront
 interface TurboWorkerMessage {
   type: 'turbo_map' | 'turbo_reduce' | 'turbo_filter';
   fn: string;
@@ -135,268 +57,151 @@ interface TurboWorkerMessage {
   endIndex: number;
   workerId: number;
   totalWorkers: number;
-  context?: Record<string, unknown>;
-  // For SharedArrayBuffer mode
-  inputBuffer?: SharedArrayBuffer;
-  outputBuffer?: SharedArrayBuffer;
-  controlBuffer?: SharedArrayBuffer;
-  // For regular array mode
-  chunk?: unknown[];
+  context: Record<string, unknown> | undefined;
+  inputBuffer: SharedArrayBuffer | undefined;
+  outputBuffer: SharedArrayBuffer | undefined;
+  controlBuffer: SharedArrayBuffer | undefined;
+  chunk: unknown[] | undefined;
+  initialValue: unknown | undefined;
 }
 
-/**
- * Response from turbo worker.
- */
+// Monomorphic response shape
 interface TurboWorkerResponse {
   type: 'turbo_complete' | 'turbo_error';
   workerId: number;
-  result?: unknown[];
-  error?: { name: string; message: string; stack?: string };
+  result: unknown[] | undefined;
+  error: { name: string; message: string; stack: string | undefined } | undefined;
   itemsProcessed: number;
 }
 
 // ============================================================================
-// TYPED ARRAY DETECTION
+// TYPED ARRAY DETECTION (V8: for loop, no .some())
 // ============================================================================
 
-/** Numeric TypedArray constructors (excluding BigInt variants) */
-const TYPED_ARRAY_TYPES = [
+const TYPED_ARRAY_CONSTRUCTORS = [
   Float64Array, Float32Array,
   Int32Array, Int16Array, Int8Array,
   Uint32Array, Uint16Array, Uint8Array, Uint8ClampedArray
-] as const;
+];
 
-type NumericTypedArray = InstanceType<typeof TYPED_ARRAY_TYPES[number]>;
+type NumericTypedArray = 
+  | Float64Array | Float32Array
+  | Int32Array | Int16Array | Int8Array
+  | Uint32Array | Uint16Array | Uint8Array | Uint8ClampedArray;
 
-/**
- * Checks if value is a numeric TypedArray (excludes BigInt variants).
- */
-function isNumericTypedArray(value: unknown): value is NumericTypedArray {
-  if (!value || typeof value !== 'object') return false;
-  for (let i = 0; i < TYPED_ARRAY_TYPES.length; i++) {
-    if (value instanceof TYPED_ARRAY_TYPES[i]) return true;
+function isTypedArray(value: unknown): value is NumericTypedArray {
+  if (value === null || typeof value !== 'object') return false;
+  const len = TYPED_ARRAY_CONSTRUCTORS.length;
+  for (let i = 0; i < len; i++) {
+    if (value instanceof TYPED_ARRAY_CONSTRUCTORS[i]) return true;
   }
   return false;
 }
 
+
 // ============================================================================
-// TURBO EXECUTOR
+// TURBO EXECUTOR - NEW SYNTAX: turbo(arr).map(fn)
 // ============================================================================
 
-/**
- * TurboExecutor - Fluent API for parallel array processing.
- *
- * @example
- * ```typescript
- * // Map - transform each item
- * const squares = await beeThreads.turbo((x) => x * x).map(numbers);
- *
- * // With options
- * const results = await beeThreads
- *   .turbo((x) => heavyComputation(x), { workers: 4 })
- *   .map(largeArray);
- *
- * // Get stats
- * const { data, stats } = await beeThreads
- *   .turbo((x) => x * 2)
- *   .mapWithStats(numbers);
- * console.log(stats.speedupRatio); // "7.2x"
- * ```
- */
-export interface TurboExecutor<T, TInput = unknown> {
-  /**
-   * Applies the function to each item in parallel across all workers.
-   * Returns the transformed array.
-   *
-   * @param data - Array or TypedArray to process
-   * @returns Promise resolving to transformed array
-   *
-   * @example
-   * ```typescript
-   * const squares = await beeThreads.turbo((x: number) => x * x).map([1, 2, 3]);
-   * // squares: number[]
-   * ```
-   */
-  map<D extends TInput[] | NumericTypedArray>(data: D): Promise<D extends NumericTypedArray ? D : T[]>;
-
-  /**
-   * Same as map() but also returns execution statistics.
-   *
-   * @param data - Array or TypedArray to process
-   * @returns Promise resolving to result with stats
-   *
-   * @example
-   * ```typescript
-   * const { data, stats } = await beeThreads.turbo((x: number) => x * x).mapWithStats([1, 2, 3]);
-   * console.log(`Processed ${stats.totalItems} items in ${stats.executionTime}ms`);
-   * ```
-   */
-  mapWithStats<D extends TInput[] | NumericTypedArray>(data: D): Promise<TurboResult<D extends NumericTypedArray ? number : T>>;
-
-  /**
-   * Filters items in parallel, keeping only those where predicate returns true.
-   *
-   * @param data - Array to filter
-   * @returns Promise resolving to filtered array (same type as input)
-   *
-   * @example
-   * ```typescript
-   * const evens = await beeThreads.turbo((x: number) => x % 2 === 0).filter([1, 2, 3, 4]);
-   * // evens: number[]
-   * ```
-   */
-  filter<U>(data: U[]): Promise<U[]>;
-
-  /**
-   * Reduces array using parallel tree reduction.
-   * The reducer function receives two values and must return their combination.
-   *
-   * @param data - Array to reduce
-   * @param initialValue - Initial value for reduction
-   * @returns Promise resolving to reduced value
-   *
-   * @example
-   * ```typescript
-   * const sum = await beeThreads.turbo((a: number, b: number) => a + b).reduce([1, 2, 3], 0);
-   * // sum: number
-   * ```
-   */
-  reduce<R>(data: unknown[], initialValue: R): Promise<R>;
+export interface TurboExecutor<TItem> {
+  map<TResult>(fn: (item: TItem, index: number) => TResult): Promise<TResult[]>;
+  mapWithStats<TResult>(fn: (item: TItem, index: number) => TResult): Promise<TurboResult<TResult>>;
+  filter(fn: (item: TItem, index: number) => boolean): Promise<TItem[]>;
+  reduce<TResult>(fn: (acc: TResult, item: TItem, index: number) => TResult, initialValue: TResult): Promise<TResult>;
 }
 
 /**
  * Creates a TurboExecutor for parallel array processing.
- *
- * @param fn - Function to apply to each item (for map/filter) or reducer (for reduce)
+ * 
+ * @param data - Array or TypedArray to process
  * @param options - Turbo execution options
  * @returns TurboExecutor with map, filter, reduce methods
- *
+ * 
  * @example
  * ```typescript
- * // Simple map
- * const results = await createTurboExecutor((x) => x * 2).map(largeArray);
- *
- * // With options
- * const results = await createTurboExecutor(
- *   (x) => heavyMath(x),
- *   { workers: 4, context: { PI: Math.PI } }
- * ).map(data);
+ * const squares = await beeThreads.turbo(numbers).map(x => x * x)
+ * const evens = await beeThreads.turbo(numbers).filter(x => x % 2 === 0)
+ * const sum = await beeThreads.turbo(numbers).reduce((a, b) => a + b, 0)
  * ```
  */
-export function createTurboExecutor<T, TInput = unknown>(
-  fn: Function,
+export function createTurboExecutor<TItem>(
+  data: TItem[] | NumericTypedArray,
   options: TurboOptions = {}
-): TurboExecutor<T, TInput> {
-  const fnString = fn.toString();
-
-  return {
-    async map<D extends TInput[] | NumericTypedArray>(data: D): Promise<D extends NumericTypedArray ? D : T[]> {
-      const result = await executeTurboMap<T>(fnString, data as unknown[] | NumericTypedArray, options);
-      return result as D extends NumericTypedArray ? D : T[];
+): TurboExecutor<TItem> {
+  // V8: Monomorphic object shape - all methods declared upfront
+  const executor: TurboExecutor<TItem> = {
+    map<TResult>(fn: (item: TItem, index: number) => TResult): Promise<TResult[]> {
+      const fnString = fn.toString();
+      return executeTurboMap<TResult>(fnString, data as unknown[], options);
     },
 
-    async mapWithStats<D extends TInput[] | NumericTypedArray>(
-      data: D
-    ): Promise<TurboResult<D extends NumericTypedArray ? number : T>> {
+    mapWithStats<TResult>(fn: (item: TItem, index: number) => TResult): Promise<TurboResult<TResult>> {
+      const fnString = fn.toString();
       const startTime = Date.now();
-      const [result, stats] = await executeTurboMapWithStats<T>(fnString, data as unknown[] | NumericTypedArray, options);
-      stats.executionTime = Date.now() - startTime;
-      return {
-        data: result as (D extends NumericTypedArray ? number : T)[],
-        stats
-      };
+      return executeTurboMapWithStats<TResult>(fnString, data as unknown[], options, startTime);
     },
 
-    async filter<U>(data: U[]): Promise<U[]> {
-      return executeTurboFilter(fnString, data, options) as Promise<U[]>;
+    filter(fn: (item: TItem, index: number) => boolean): Promise<TItem[]> {
+      const fnString = fn.toString();
+      return executeTurboFilter<TItem>(fnString, data as unknown[], options);
     },
 
-    async reduce<R>(data: unknown[], initialValue: R): Promise<R> {
-      return executeTurboReduce<R>(fnString, data, initialValue, options);
+    reduce<TResult>(fn: (acc: TResult, item: TItem, index: number) => TResult, initialValue: TResult): Promise<TResult> {
+      const fnString = fn.toString();
+      return executeTurboReduce<TResult>(fnString, data as unknown[], initialValue, options);
     }
   };
+
+  return executor;
 }
 
 // ============================================================================
-// CORE EXECUTION FUNCTIONS
+// CORE EXECUTION - V8 OPTIMIZED
 // ============================================================================
 
-/**
- * Executes parallel map operation.
- */
 async function executeTurboMap<T>(
   fnString: string,
-  data: unknown[] | NumericTypedArray,
+  data: unknown[],
   options: TurboOptions
 ): Promise<T[]> {
-  const [result] = await executeTurboMapWithStats<T>(fnString, data, options);
-  return result;
+  const result = await executeTurboMapWithStats<T>(fnString, data, options, Date.now());
+  return result.data;
 }
 
-/**
- * Executes parallel map with statistics.
- */
 async function executeTurboMapWithStats<T>(
   fnString: string,
-  data: unknown[] | NumericTypedArray,
-  options: TurboOptions
-): Promise<[T[], TurboStats]> {
-  const startTime = Date.now();
+  data: unknown[],
+  options: TurboOptions,
+  startTime: number
+): Promise<TurboResult<T>> {
   const dataLength = data.length;
-  const isTyped = isNumericTypedArray(data);
+  const isTyped = isTypedArray(data);
 
-  // Check if turbo is worth it
+  // Small array fallback
   if (!options.force && dataLength < TURBO_THRESHOLD) {
-    // Fallback to single execution
-    if (config.logger) {
-      config.logger.log(
-        `⚡ bee.turbo: Array with ${dataLength} items - using single worker (turbo threshold: ${TURBO_THRESHOLD})`
-      );
-    }
     return fallbackSingleExecution<T>(fnString, data, options, startTime);
   }
 
-  // Calculate optimal worker count and chunk size
-  const maxWorkers = options.workers ?? config.poolSize;
-  const optimalWorkers = Math.min(
-    maxWorkers,
-    Math.ceil(dataLength / MIN_ITEMS_PER_WORKER)
-  );
-  const numWorkers = Math.max(1, optimalWorkers);
-  const chunkSize = options.chunkSize ?? Math.ceil(dataLength / numWorkers);
+  // Calculate workers (V8: simple math, no method chains)
+  const maxWorkers = options.workers !== undefined ? options.workers : config.poolSize;
+  const calculatedWorkers = Math.ceil(dataLength / MIN_ITEMS_PER_WORKER);
+  const numWorkers = calculatedWorkers < maxWorkers ? calculatedWorkers : maxWorkers;
+  const actualWorkers = numWorkers > 1 ? numWorkers : 1;
+  const chunkSize = options.chunkSize !== undefined ? options.chunkSize : Math.ceil(dataLength / actualWorkers);
 
-  if (config.logger) {
-    config.logger.log(
-      `⚡ bee.turbo: ${dataLength.toLocaleString()} items → ${numWorkers} workers → ~${Math.ceil(dataLength / numWorkers).toLocaleString()} items/worker`
-    );
-  }
-
-  // Use SharedArrayBuffer for TypedArrays
+  // TypedArray path - SharedArrayBuffer
   if (isTyped) {
-    return executeTurboTypedArray<T>(
-      fnString,
-      data as NumericTypedArray,
-      numWorkers,
-      chunkSize,
-      options,
-      startTime
-    );
+    return executeTurboTypedArray<T>(fnString, data as NumericTypedArray, actualWorkers, chunkSize, options, startTime);
   }
 
-  // Use chunk-based parallel execution for regular arrays
-  return executeTurboRegularArray<T>(
-    fnString,
-    data as unknown[],
-    numWorkers,
-    chunkSize,
-    options,
-    startTime
-  );
+  // Regular array path
+  return executeTurboRegularArray<T>(fnString, data, actualWorkers, chunkSize, options, startTime);
 }
 
-/**
- * Executes turbo map on TypedArray using SharedArrayBuffer.
- */
+// ============================================================================
+// TYPED ARRAY EXECUTION - SHARED MEMORY
+// ============================================================================
+
 async function executeTurboTypedArray<T>(
   fnString: string,
   data: NumericTypedArray,
@@ -404,85 +209,84 @@ async function executeTurboTypedArray<T>(
   chunkSize: number,
   options: TurboOptions,
   startTime: number
-): Promise<[T[], TurboStats]> {
+): Promise<TurboResult<T>> {
   const dataLength = data.length;
-  const bytesPerElement = data.BYTES_PER_ELEMENT;
 
-  // Create SharedArrayBuffer for input (copy data into it)
-  const inputBuffer = new SharedArrayBuffer(dataLength * bytesPerElement);
-  // Use Float64Array view for SharedArrayBuffer (compatible with all numeric types)
+  // Create SharedArrayBuffers (V8: direct construction)
+  const inputBuffer = new SharedArrayBuffer(dataLength * 8);
+  const outputBuffer = new SharedArrayBuffer(dataLength * 8);
+  const controlBuffer = new SharedArrayBuffer(4);
+
+  // Copy input data (V8: raw for loop)
   const inputView = new Float64Array(inputBuffer);
-  // Copy data from source TypedArray to shared buffer
   for (let i = 0; i < dataLength; i++) {
     inputView[i] = data[i];
   }
 
-  // Create SharedArrayBuffer for output
-  const outputBuffer = new SharedArrayBuffer(dataLength * bytesPerElement);
   const outputView = new Float64Array(outputBuffer);
-
-  // Create control buffer for synchronization (Int32Array for Atomics)
-  // [0] = completed workers count
-  const controlBuffer = new SharedArrayBuffer(4);
   const controlView = new Int32Array(controlBuffer);
   Atomics.store(controlView, 0, 0);
 
-  // Dispatch work to workers
-  const workerPromises: Promise<void>[] = [];
+  // Dispatch to workers (V8: pre-allocated array)
+  const promises: Promise<void>[] = new Array(numWorkers);
+  let workerCount = 0;
 
   for (let i = 0; i < numWorkers; i++) {
-    const startIndex = i * chunkSize;
-    const endIndex = Math.min(startIndex + chunkSize, dataLength);
+    const start = i * chunkSize;
+    const end = start + chunkSize;
+    const actualEnd = end < dataLength ? end : dataLength;
 
-    if (startIndex >= dataLength) break;
+    if (start >= dataLength) break;
 
-    const workerPromise = executeWorkerTurbo(
-      fnString,
-      {
-        type: 'turbo_map',
-        fn: fnString,
-        startIndex,
-        endIndex,
-        workerId: i,
-        totalWorkers: numWorkers,
-        context: options.context,
-        inputBuffer,
-        outputBuffer,
-        controlBuffer
-      }
-    );
+    // V8: Monomorphic message shape
+    const message: TurboWorkerMessage = {
+      type: 'turbo_map',
+      fn: fnString,
+      startIndex: start,
+      endIndex: actualEnd,
+      workerId: i,
+      totalWorkers: numWorkers,
+      context: options.context,
+      inputBuffer: inputBuffer,
+      outputBuffer: outputBuffer,
+      controlBuffer: controlBuffer,
+      chunk: undefined,
+      initialValue: undefined
+    };
 
-    workerPromises.push(workerPromise);
+    promises[i] = executeWorkerTurbo(fnString, message);
+    workerCount++;
   }
 
-  // Wait for all workers to complete
-  await Promise.all(workerPromises);
+  // Wait for completion (V8: slice to actual size)
+  await Promise.all(promises.slice(0, workerCount));
 
-  // Convert output to regular array
-  const result: T[] = [];
+  // Build result (V8: pre-allocated array)
+  const result: T[] = new Array(dataLength);
   for (let i = 0; i < dataLength; i++) {
-    result.push(outputView[i] as unknown as T);
+    result[i] = outputView[i] as unknown as T;
   }
 
   const executionTime = Date.now() - startTime;
-  const estimatedSingleTime = executionTime * numWorkers * 0.8; // Conservative estimate
+  const estimatedSingle = executionTime * workerCount * 0.8;
 
+  // V8: Monomorphic stats shape
   const stats: TurboStats = {
     totalItems: dataLength,
-    workersUsed: numWorkers,
-    itemsPerWorker: Math.ceil(dataLength / numWorkers),
+    workersUsed: workerCount,
+    itemsPerWorker: Math.ceil(dataLength / workerCount),
     usedSharedMemory: true,
-    executionTime,
-    speedupRatio: `${(estimatedSingleTime / executionTime).toFixed(1)}x`
+    executionTime: executionTime,
+    speedupRatio: (estimatedSingle / executionTime).toFixed(1) + 'x'
   };
 
-  return [result, stats];
+  return { data: result, stats: stats };
 }
 
-/**
- * Executes turbo map on regular array using chunk distribution.
- * Uses FAIL-FAST: if any worker errors, all others are aborted.
- */
+// ============================================================================
+// REGULAR ARRAY EXECUTION - CHUNK BASED
+// ============================================================================
+
 async function executeTurboRegularArray<T>(
   fnString: string,
   data: unknown[],
@@ -490,144 +294,171 @@ async function executeTurboRegularArray<T>(
   chunkSize: number,
   options: TurboOptions,
   startTime: number
-): Promise<[T[], TurboStats]> {
+): Promise<TurboResult<T>> {
   const dataLength = data.length;
-  const chunks: { startIndex: number; endIndex: number; data: unknown[] }[] = [];
 
-  // Split into chunks using for loop (V8 optimized, stable shape)
+  // Build chunks (V8: pre-allocated, raw for loop)
+  const maxChunks = Math.ceil(dataLength / chunkSize);
+  const chunks: unknown[][] = new Array(maxChunks);
+  let chunkCount = 0;
+
   for (let i = 0; i < numWorkers; i++) {
-    const startIndex = i * chunkSize;
-    const endIndex = Math.min(startIndex + chunkSize, dataLength);
+    const start = i * chunkSize;
+    const end = start + chunkSize;
+    const actualEnd = end < dataLength ? end : dataLength;
 
-    if (startIndex >= dataLength) break;
+    if (start >= dataLength) break;
 
-    chunks.push({
-      startIndex,
-      endIndex,
-      data: data.slice(startIndex, endIndex)
-    });
+    // V8: slice is optimized, but we track bounds manually
+    chunks[i] = data.slice(start, actualEnd);
+    chunkCount++;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // FAIL-FAST EXECUTION: If ANY worker fails, abort ALL and reject immediately
-  // ═══════════════════════════════════════════════════════════════════════════
-  
+  // Fail-fast state
   let aborted = false;
   let firstError: Error | null = null;
-  const cleanupFns: (() => void)[] = [];
-  
-  const chunkPromises: Promise<T[]>[] = [];
-  
-  for (let i = 0; i < chunks.length; i++) {
+  const cleanupFns: Array<() => void> = new Array(chunkCount);
+  let cleanupCount = 0;
+
+  // Dispatch workers (V8: pre-allocated promises)
+  const promises: Promise<T[]>[] = new Array(chunkCount);
+
+  for (let i = 0; i < chunkCount; i++) {
     const chunk = chunks[i];
-    const promise = executeWorkerTurboChunkWithAbort<T>(
+    const workerId = i;
+
+    promises[i] = executeWorkerTurboChunk<T>(
       fnString,
-      chunk.data,
-      i,
-      chunks.length,
+      chunk,
+      workerId,
+      chunkCount,
       options.context,
-      () => aborted, // Check if should abort
-      (cleanup) => { cleanupFns.push(cleanup); } // Register cleanup
+      () => aborted,
+      (cleanup: () => void) => { cleanupFns[cleanupCount++] = cleanup; }
     ).catch((err: Error) => {
-      // First error triggers abort
       if (!aborted) {
         aborted = true;
         firstError = err;
       }
       throw err;
     });
-    chunkPromises.push(promise);
   }
 
-  // Wait for all - but if one fails, we've already marked aborted
+  // Wait for all
   let chunkResults: T[][];
   try {
-    chunkResults = await Promise.all(chunkPromises);
+    chunkResults = await Promise.all(promises);
   } catch (err) {
-    // Cleanup all workers that might still be running
-    for (let i = 0; i < cleanupFns.length; i++) {
-      try { cleanupFns[i](); } catch { /* ignore cleanup errors */ }
+    // Cleanup (V8: raw for loop)
+    for (let i = 0; i < cleanupCount; i++) {
+      try { cleanupFns[i](); } catch { /* ignore */ }
     }
-    // Propagate the first error
-    throw firstError || err;
+    throw firstError !== null ? firstError : err;
   }
 
-  // Merge results in order (for loop - V8 optimized)
-  const result: T[] = [];
-  for (let i = 0; i < chunkResults.length; i++) {
+  // Merge results (V8: calculate total size first, then fill)
+  let totalSize = 0;
+  for (let i = 0; i < chunkCount; i++) {
+    totalSize += chunkResults[i].length;
+  }
+
+  const result: T[] = new Array(totalSize);
+  let idx = 0;
+  for (let i = 0; i < chunkCount; i++) {
     const chunkResult = chunkResults[i];
-    for (let j = 0; j < chunkResult.length; j++) {
-      result.push(chunkResult[j]);
+    const chunkLen = chunkResult.length;
+    for (let j = 0; j < chunkLen; j++) {
+      result[idx++] = chunkResult[j];
     }
   }
 
   const executionTime = Date.now() - startTime;
-  const estimatedSingleTime = executionTime * numWorkers * 0.7;
+  const estimatedSingle = executionTime * chunkCount * 0.7;
 
   const stats: TurboStats = {
     totalItems: dataLength,
-    workersUsed: chunks.length,
-    itemsPerWorker: Math.ceil(dataLength / chunks.length),
+    workersUsed: chunkCount,
+    itemsPerWorker: Math.ceil(dataLength / chunkCount),
     usedSharedMemory: false,
-    executionTime,
-    speedupRatio: `${(estimatedSingleTime / executionTime).toFixed(1)}x`
+    executionTime: executionTime,
+    speedupRatio: (estimatedSingle / executionTime).toFixed(1) + 'x'
   };
 
-  return [result, stats];
+  return { data: result, stats: stats };
 }
 
-/**
- * Executes turbo filter operation.
- */
-async function executeTurboFilter(
+// ============================================================================
+// FILTER EXECUTION
+// ============================================================================
+
+async function executeTurboFilter<T>(
   fnString: string,
   data: unknown[],
   options: TurboOptions
-): Promise<unknown[]> {
+): Promise<T[]> {
   const dataLength = data.length;
 
-  // Check if turbo is worth it
+  // Small array fallback (V8: inline function creation)
   if (!options.force && dataLength < TURBO_THRESHOLD) {
-    // Fallback to single execution
     const fn = new Function('return ' + fnString)();
-    return data.filter(fn);
+    const result: T[] = [];
+    for (let i = 0; i < dataLength; i++) {
+      if (fn(data[i], i)) {
+        result.push(data[i] as T);
+      }
+    }
+    return result;
   }
 
-  const maxWorkers = options.workers ?? config.poolSize;
-  const numWorkers = Math.min(maxWorkers, Math.ceil(dataLength / MIN_ITEMS_PER_WORKER));
+  const maxWorkers = options.workers !== undefined ? options.workers : config.poolSize;
+  const calculatedWorkers = Math.ceil(dataLength / MIN_ITEMS_PER_WORKER);
+  const numWorkers = calculatedWorkers < maxWorkers ? calculatedWorkers : maxWorkers;
   const chunkSize = Math.ceil(dataLength / numWorkers);
 
-  // Split into chunks
-  const chunks: unknown[][] = [];
+  // Build chunks
+  const chunks: unknown[][] = new Array(numWorkers);
+  let chunkCount = 0;
+
   for (let i = 0; i < numWorkers; i++) {
     const start = i * chunkSize;
-    const end = Math.min(start + chunkSize, dataLength);
+    const end = start + chunkSize;
+    const actualEnd = end < dataLength ? end : dataLength;
     if (start >= dataLength) break;
-    chunks.push(data.slice(start, end));
+    chunks[i] = data.slice(start, actualEnd);
+    chunkCount++;
   }
 
-  // Execute filter on each chunk in parallel
-  const chunkResults = await Promise.all(
-    chunks.map((chunk, i) =>
-      executeWorkerTurboFilter(fnString, chunk, i, chunks.length, options.context)
-    )
-  );
+  // Execute in parallel
+  const promises: Promise<unknown[]>[] = new Array(chunkCount);
+  for (let i = 0; i < chunkCount; i++) {
+    promises[i] = executeWorkerTurboFilterChunk(fnString, chunks[i], i, chunkCount, options.context);
+  }
 
-  // Merge filtered results
-  const result: unknown[] = [];
-  for (let i = 0; i < chunkResults.length; i++) {
+  const chunkResults = await Promise.all(promises);
+
+  // Merge (V8: calculate size first)
+  let totalSize = 0;
+  for (let i = 0; i < chunkCount; i++) {
+    totalSize += chunkResults[i].length;
+  }
+
+  const result: T[] = new Array(totalSize);
+  let idx = 0;
+  for (let i = 0; i < chunkCount; i++) {
     const chunkResult = chunkResults[i];
-    for (let j = 0; j < chunkResult.length; j++) {
-      result.push(chunkResult[j]);
+    const chunkLen = chunkResult.length;
+    for (let j = 0; j < chunkLen; j++) {
+      result[idx++] = chunkResult[j] as T;
     }
   }
 
   return result;
 }
 
-/**
- * Executes turbo reduce using parallel tree reduction.
- */
+// ============================================================================
+// REDUCE EXECUTION
+// ============================================================================
+
 async function executeTurboReduce<R>(
   fnString: string,
   data: unknown[],
@@ -636,36 +467,46 @@ async function executeTurboReduce<R>(
 ): Promise<R> {
   const dataLength = data.length;
 
-  // Check if turbo is worth it
+  // Small array fallback
   if (!options.force && dataLength < TURBO_THRESHOLD) {
     const fn = new Function('return ' + fnString)();
-    return data.reduce(fn, initialValue) as R;
+    let acc = initialValue;
+    for (let i = 0; i < dataLength; i++) {
+      acc = fn(acc, data[i], i);
+    }
+    return acc;
   }
 
-  const maxWorkers = options.workers ?? config.poolSize;
-  const numWorkers = Math.min(maxWorkers, Math.ceil(dataLength / MIN_ITEMS_PER_WORKER));
+  const maxWorkers = options.workers !== undefined ? options.workers : config.poolSize;
+  const calculatedWorkers = Math.ceil(dataLength / MIN_ITEMS_PER_WORKER);
+  const numWorkers = calculatedWorkers < maxWorkers ? calculatedWorkers : maxWorkers;
   const chunkSize = Math.ceil(dataLength / numWorkers);
 
-  // Split into chunks
-  const chunks: unknown[][] = [];
+  // Build chunks
+  const chunks: unknown[][] = new Array(numWorkers);
+  let chunkCount = 0;
+
   for (let i = 0; i < numWorkers; i++) {
     const start = i * chunkSize;
-    const end = Math.min(start + chunkSize, dataLength);
+    const end = start + chunkSize;
+    const actualEnd = end < dataLength ? end : dataLength;
     if (start >= dataLength) break;
-    chunks.push(data.slice(start, end));
+    chunks[i] = data.slice(start, actualEnd);
+    chunkCount++;
   }
 
-  // Phase 1: Reduce each chunk in parallel
-  const chunkResults = await Promise.all(
-    chunks.map((chunk, i) =>
-      executeWorkerTurboReduce<R>(fnString, chunk, initialValue, i, chunks.length, options.context)
-    )
-  );
+  // Phase 1: Parallel reduction per chunk
+  const promises: Promise<R>[] = new Array(chunkCount);
+  for (let i = 0; i < chunkCount; i++) {
+    promises[i] = executeWorkerTurboReduceChunk<R>(fnString, chunks[i], initialValue, i, chunkCount, options.context);
+  }
 
-  // Phase 2: Final reduction of chunk results
+  const chunkResults = await Promise.all(promises);
+
+  // Phase 2: Final reduction (V8: raw for loop)
   const fn = new Function('return ' + fnString)();
   let result = initialValue;
-  for (let i = 0; i < chunkResults.length; i++) {
+  for (let i = 0; i < chunkCount; i++) {
     result = fn(result, chunkResults[i]);
   }
 
@@ -673,26 +514,21 @@ async function executeTurboReduce<R>(
 }
 
 // ============================================================================
-// WORKER EXECUTION HELPERS
+// WORKER HELPERS - V8 OPTIMIZED
 // ============================================================================
 
-/**
- * Executes a turbo task on a worker with SharedArrayBuffer.
- */
 async function executeWorkerTurbo(
   fnString: string,
   message: TurboWorkerMessage
 ): Promise<void> {
   const fnHash = fastHash(fnString);
-
-  // Request worker with high priority
   const { entry, worker, temporary } = await requestWorker('normal', 'high', fnHash);
 
   return new Promise((resolve, reject) => {
     const startTime = Date.now();
     let settled = false;
 
-    const cleanup = () => {
+    const cleanup = (): void => {
       if (settled) return;
       settled = true;
       worker.removeListener('message', onMessage);
@@ -700,44 +536,30 @@ async function executeWorkerTurbo(
       releaseWorker(entry, worker, temporary, 'normal', Date.now() - startTime, false, fnHash);
     };
 
-    const onMessage = (msg: TurboWorkerResponse) => {
+    const onMessage = (msg: TurboWorkerResponse): void => {
       if (msg.type === 'turbo_complete') {
         cleanup();
         resolve();
       } else if (msg.type === 'turbo_error') {
         cleanup();
-        const err = new Error(msg.error?.message || 'Turbo worker error');
-        err.name = msg.error?.name || 'TurboError';
+        const err = new Error(msg.error !== undefined ? msg.error.message : 'Turbo worker error');
+        err.name = msg.error !== undefined ? msg.error.name : 'TurboError';
         reject(err);
       }
     };
 
-    const onError = (err: Error) => {
+    const onError = (err: Error): void => {
       cleanup();
       reject(err);
     };
 
     worker.on('message', onMessage);
     worker.on('error', onError);
-
-    // Send turbo task
     worker.postMessage(message);
   });
 }
 
-/**
- * Executes a turbo map on a chunk WITH ABORT SUPPORT.
- * This version allows early termination if another worker fails.
- * 
- * @param fnString - Function source
- * @param chunk - Data chunk to process
- * @param workerId - Worker ID for ordering
- * @param totalWorkers - Total workers in this turbo execution
- * @param context - Context variables
- * @param shouldAbort - Function that returns true if execution should abort
- * @param registerCleanup - Function to register cleanup callback
- */
-async function executeWorkerTurboChunkWithAbort<T>(
+async function executeWorkerTurboChunk<T>(
   fnString: string,
   chunk: unknown[],
   workerId: number,
@@ -746,9 +568,8 @@ async function executeWorkerTurboChunkWithAbort<T>(
   shouldAbort: () => boolean,
   registerCleanup: (cleanup: () => void) => void
 ): Promise<T[]> {
-  // Check abort BEFORE requesting worker (fail-fast)
   if (shouldAbort()) {
-    throw new Error('Turbo execution aborted due to error in another worker');
+    throw new Error('Turbo execution aborted');
   }
 
   const fnHash = fastHash(fnString);
@@ -758,7 +579,7 @@ async function executeWorkerTurboChunkWithAbort<T>(
     const startTime = Date.now();
     let settled = false;
 
-    const cleanup = () => {
+    const cleanup = (): void => {
       if (settled) return;
       settled = true;
       worker.removeListener('message', onMessage);
@@ -766,30 +587,27 @@ async function executeWorkerTurboChunkWithAbort<T>(
       releaseWorker(entry, worker, temporary, 'normal', Date.now() - startTime, false, fnHash);
     };
 
-    // Register cleanup so it can be called from outside if abort needed
     registerCleanup(cleanup);
 
-    const onMessage = (msg: TurboWorkerResponse | { type: string }) => {
-      // Check abort after receiving message
+    const onMessage = (msg: TurboWorkerResponse): void => {
       if (shouldAbort() && !settled) {
         cleanup();
-        reject(new Error('Turbo execution aborted due to error in another worker'));
+        reject(new Error('Turbo execution aborted'));
         return;
       }
 
-      if ('type' in msg && msg.type === 'turbo_complete') {
+      if (msg.type === 'turbo_complete') {
         cleanup();
-        resolve((msg as TurboWorkerResponse).result as T[]);
-      } else if ('type' in msg && msg.type === 'turbo_error') {
+        resolve(msg.result as T[]);
+      } else if (msg.type === 'turbo_error') {
         cleanup();
-        const errMsg = msg as TurboWorkerResponse;
-        const err = new Error(errMsg.error?.message || 'Turbo worker error');
-        err.name = errMsg.error?.name || 'TurboWorkerError';
+        const err = new Error(msg.error !== undefined ? msg.error.message : 'Turbo worker error');
+        err.name = msg.error !== undefined ? msg.error.name : 'TurboWorkerError';
         reject(err);
       }
     };
 
-    const onError = (err: Error) => {
+    const onError = (err: Error): void => {
       cleanup();
       reject(err);
     };
@@ -797,26 +615,32 @@ async function executeWorkerTurboChunkWithAbort<T>(
     worker.on('message', onMessage);
     worker.on('error', onError);
 
-    worker.postMessage({
+    // V8: Monomorphic message
+    const message: TurboWorkerMessage = {
       type: 'turbo_map',
       fn: fnString,
-      chunk,
-      workerId,
-      totalWorkers,
-      context
-    } as TurboWorkerMessage);
+      startIndex: 0,
+      endIndex: 0,
+      workerId: workerId,
+      totalWorkers: totalWorkers,
+      context: context,
+      inputBuffer: undefined,
+      outputBuffer: undefined,
+      controlBuffer: undefined,
+      chunk: chunk,
+      initialValue: undefined
+    };
+
+    worker.postMessage(message);
   });
 }
 
-/**
- * Executes a turbo filter on a chunk.
- */
-async function executeWorkerTurboFilter(
+async function executeWorkerTurboFilterChunk(
   fnString: string,
   chunk: unknown[],
   workerId: number,
   totalWorkers: number,
-  context?: Record<string, unknown>
+  context: Record<string, unknown> | undefined
 ): Promise<unknown[]> {
   const fnHash = fastHash(fnString);
   const { entry, worker, temporary } = await requestWorker('normal', 'high', fnHash);
@@ -825,7 +649,7 @@ async function executeWorkerTurboFilter(
     const startTime = Date.now();
     let settled = false;
 
-    const cleanup = () => {
+    const cleanup = (): void => {
       if (settled) return;
       settled = true;
       worker.removeListener('message', onMessage);
@@ -833,19 +657,17 @@ async function executeWorkerTurboFilter(
       releaseWorker(entry, worker, temporary, 'normal', Date.now() - startTime, false, fnHash);
     };
 
-    const onMessage = (msg: TurboWorkerResponse | { type: string }) => {
-      if ('type' in msg && msg.type === 'turbo_complete') {
+    const onMessage = (msg: TurboWorkerResponse): void => {
+      if (msg.type === 'turbo_complete') {
         cleanup();
-        resolve((msg as TurboWorkerResponse).result || []);
-      } else if ('type' in msg && msg.type === 'turbo_error') {
+        resolve(msg.result !== undefined ? msg.result : []);
+      } else if (msg.type === 'turbo_error') {
         cleanup();
-        const errMsg = msg as TurboWorkerResponse;
-        const err = new Error(errMsg.error?.message || 'Turbo worker error');
-        reject(err);
+        reject(new Error(msg.error !== undefined ? msg.error.message : 'Turbo worker error'));
       }
     };
 
-    const onError = (err: Error) => {
+    const onError = (err: Error): void => {
       cleanup();
       reject(err);
     };
@@ -856,24 +678,21 @@ async function executeWorkerTurboFilter(
     worker.postMessage({
       type: 'turbo_filter',
       fn: fnString,
-      chunk,
-      workerId,
-      totalWorkers,
-      context
+      chunk: chunk,
+      workerId: workerId,
+      totalWorkers: totalWorkers,
+      context: context
     });
   });
 }
 
-/**
- * Executes a turbo reduce on a chunk.
- */
-async function executeWorkerTurboReduce<R>(
+async function executeWorkerTurboReduceChunk<R>(
   fnString: string,
   chunk: unknown[],
   initialValue: R,
   workerId: number,
   totalWorkers: number,
-  context?: Record<string, unknown>
+  context: Record<string, unknown> | undefined
 ): Promise<R> {
   const fnHash = fastHash(fnString);
   const { entry, worker, temporary } = await requestWorker('normal', 'high', fnHash);
@@ -882,7 +701,7 @@ async function executeWorkerTurboReduce<R>(
     const startTime = Date.now();
     let settled = false;
 
-    const cleanup = () => {
+    const cleanup = (): void => {
       if (settled) return;
       settled = true;
       worker.removeListener('message', onMessage);
@@ -890,20 +709,18 @@ async function executeWorkerTurboReduce<R>(
       releaseWorker(entry, worker, temporary, 'normal', Date.now() - startTime, false, fnHash);
     };
 
-    const onMessage = (msg: TurboWorkerResponse | { type: string }) => {
-      if ('type' in msg && msg.type === 'turbo_complete') {
+    const onMessage = (msg: TurboWorkerResponse): void => {
+      if (msg.type === 'turbo_complete') {
         cleanup();
-        const result = (msg as TurboWorkerResponse).result;
-        resolve(result?.[0] as R);
-      } else if ('type' in msg && msg.type === 'turbo_error') {
+        const result = msg.result;
+        resolve(result !== undefined && result.length > 0 ? result[0] as R : initialValue);
+      } else if (msg.type === 'turbo_error') {
         cleanup();
-        const errMsg = msg as TurboWorkerResponse;
-        const err = new Error(errMsg.error?.message || 'Turbo worker error');
-        reject(err);
+        reject(new Error(msg.error !== undefined ? msg.error.message : 'Turbo worker error'));
       }
     };
 
-    const onError = (err: Error) => {
+    const onError = (err: Error): void => {
       cleanup();
       reject(err);
     };
@@ -914,64 +731,61 @@ async function executeWorkerTurboReduce<R>(
     worker.postMessage({
       type: 'turbo_reduce',
       fn: fnString,
-      chunk,
-      initialValue,
-      workerId,
-      totalWorkers,
-      context
+      chunk: chunk,
+      initialValue: initialValue,
+      workerId: workerId,
+      totalWorkers: totalWorkers,
+      context: context
     });
   });
 }
 
 // ============================================================================
-// FALLBACK EXECUTION
+// FALLBACK - SINGLE WORKER
 // ============================================================================
 
-/**
- * Fallback to single-worker execution for small arrays.
- */
 async function fallbackSingleExecution<T>(
   fnString: string,
-  data: unknown[] | NumericTypedArray,
+  data: unknown[],
   options: TurboOptions,
   startTime: number
-): Promise<[T[], TurboStats]> {
+): Promise<TurboResult<T>> {
   const fnHash = fastHash(fnString);
   const { entry, worker, temporary } = await requestWorker('normal', 'normal', fnHash);
+  const dataLength = data.length;
 
   return new Promise((resolve, reject) => {
-    const execStartTime = Date.now();
+    const execStart = Date.now();
     let settled = false;
 
-    const cleanup = () => {
+    const cleanup = (): void => {
       if (settled) return;
       settled = true;
       worker.removeListener('message', onMessage);
       worker.removeListener('error', onError);
-      releaseWorker(entry, worker, temporary, 'normal', Date.now() - execStartTime, false, fnHash);
+      releaseWorker(entry, worker, temporary, 'normal', Date.now() - execStart, false, fnHash);
     };
 
-    const onMessage = (msg: TurboWorkerResponse | { type: string }) => {
-      if ('type' in msg && msg.type === 'turbo_complete') {
+    const onMessage = (msg: TurboWorkerResponse): void => {
+      if (msg.type === 'turbo_complete') {
         cleanup();
         const executionTime = Date.now() - startTime;
         const stats: TurboStats = {
-          totalItems: data.length,
+          totalItems: dataLength,
           workersUsed: 1,
-          itemsPerWorker: data.length,
+          itemsPerWorker: dataLength,
           usedSharedMemory: false,
-          executionTime,
+          executionTime: executionTime,
           speedupRatio: '1.0x'
         };
-        resolve([(msg as TurboWorkerResponse).result as T[], stats]);
-      } else if ('type' in msg && msg.type === 'turbo_error') {
+        resolve({ data: msg.result as T[], stats: stats });
+      } else if (msg.type === 'turbo_error') {
         cleanup();
-        const errMsg = msg as TurboWorkerResponse;
-        reject(new Error(errMsg.error?.message || 'Turbo worker error'));
+        reject(new Error(msg.error !== undefined ? msg.error.message : 'Turbo worker error'));
       }
     };
 
-    const onError = (err: Error) => {
+    const onError = (err: Error): void => {
       cleanup();
       reject(err);
     };
@@ -979,11 +793,11 @@ async function fallbackSingleExecution<T>(
     worker.on('message', onMessage);
     worker.on('error', onError);
 
-    const chunk = isNumericTypedArray(data) ? Array.from(data as NumericTypedArray) : data;
+    const chunk = isTypedArray(data) ? Array.from(data) : data;
     worker.postMessage({
       type: 'turbo_map',
       fn: fnString,
-      chunk,
+      chunk: chunk,
       workerId: 0,
       totalWorkers: 1,
       context: options.context
@@ -996,4 +810,3 @@ async function fallbackSingleExecution<T>(
 // ============================================================================
 
 export { TURBO_THRESHOLD, MIN_ITEMS_PER_WORKER };
-

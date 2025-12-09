@@ -3165,47 +3165,47 @@ async function runTests(): Promise<void> {
     assert.ok(typeof beeThreads.turbo === 'function', 'Should have turbo method');
   });
 
-  await test('turbo() throws TypeError for non-function', () => {
+  await test('turbo() throws TypeError for non-array', () => {
     assert.throws(() => {
-      (beeThreads as any).turbo('not a function');
+      (beeThreads as any).turbo('not an array');
     }, TypeError);
   });
 
-  await test('turbo().map() processes array', async () => {
+  await test('turbo(arr).map(fn) processes array', async () => {
     const data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    const result = await beeThreads.turbo((x: number) => x * 2, { force: true }).map(data);
+    const result = await beeThreads.turbo(data, { force: true }).map((x: number) => x * 2);
     
     assert.deepStrictEqual(result, [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
   });
 
-  await test('turbo().map() processes Float64Array', async () => {
+  await test('turbo(arr).map(fn) processes Float64Array', async () => {
     const data = new Float64Array([1, 2, 3, 4, 5]);
-    const result = await beeThreads.turbo((x: number) => x * x, { force: true }).map(data);
+    const result = await beeThreads.turbo(data as any, { force: true }).map((x: number) => x * x);
     
     assert.deepStrictEqual(result, [1, 4, 9, 16, 25]);
   });
 
-  await test('turbo().filter() filters array', async () => {
+  await test('turbo(arr).filter(fn) filters array', async () => {
     const data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    const result = await beeThreads.turbo((x: number) => x % 2 === 0, { force: true }).filter(data);
+    const result = await beeThreads.turbo(data, { force: true }).filter((x: number) => x % 2 === 0);
     
     assert.deepStrictEqual(result, [2, 4, 6, 8, 10]);
   });
 
-  await test('turbo().reduce() reduces array', async () => {
+  await test('turbo(arr).reduce(fn, init) reduces array', async () => {
     const data = [1, 2, 3, 4, 5];
-    const result = await beeThreads.turbo((a: number, b: number) => a + b, { force: true }).reduce(data, 0);
+    const result = await beeThreads.turbo(data, { force: true }).reduce((a: number, b: number) => a + b, 0);
     
     assert.strictEqual(result, 15);
   });
 
-  await test('turbo().mapWithStats() returns stats', async () => {
+  await test('turbo(arr).mapWithStats(fn) returns stats', async () => {
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) data[i] = i;
     
     const { data: result, stats } = await beeThreads
-      .turbo((x: number) => Math.sqrt(x), { force: true })
-      .mapWithStats(data);
+      .turbo(data as any, { force: true })
+      .mapWithStats((x: number) => Math.sqrt(x));
     
     assert.ok(Array.isArray(result), 'Result should be array');
     assert.strictEqual(result.length, 100, 'Result should have same length');
@@ -3216,11 +3216,11 @@ async function runTests(): Promise<void> {
     assert.strictEqual(stats.totalItems, 100, 'totalItems should be 100');
   });
 
-  await test('turbo() with context injects variables', async () => {
+  await test('turbo(arr, { context }) injects variables', async () => {
     const data = [1, 2, 3, 4, 5];
     const result = await beeThreads
-      .turbo((x: number) => x * multiplier, { force: true, context: { multiplier: 10 } })
-      .map(data);
+      .turbo(data, { force: true, context: { multiplier: 10 } })
+      .map((x: number) => x * multiplier);
     
     assert.deepStrictEqual(result, [10, 20, 30, 40, 50]);
   });
@@ -3231,12 +3231,19 @@ async function runTests(): Promise<void> {
     assert.ok(threshold > 0, 'Threshold should be positive');
   });
 
-  await test('turbo() falls back for small arrays', async () => {
+  await test('turbo(arr) falls back for small arrays', async () => {
     // Small array should use fallback (no force)
     const data = [1, 2, 3];
-    const result = await beeThreads.turbo((x: number) => x * 2).map(data);
+    const result = await beeThreads.turbo(data).map((x: number) => x * 2);
     
     assert.deepStrictEqual(result, [2, 4, 6]);
+  });
+  
+  await test('turbo(arr).map(fn) preserves order', async () => {
+    const data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const result = await beeThreads.turbo(data, { force: true }).map((x: number) => x);
+    
+    assert.deepStrictEqual(result, data, 'Order must be preserved');
   });
 
   // ---------- TURBO BENCHMARKS ----------
@@ -3250,8 +3257,8 @@ async function runTests(): Promise<void> {
     // Turbo mode
     const turboStart = Date.now();
     const { stats } = await beeThreads
-      .turbo((x: number) => Math.sqrt(x) * Math.sin(x), { force: true })
-      .mapWithStats(data);
+      .turbo(data as any, { force: true })
+      .mapWithStats((x: number) => Math.sqrt(x) * Math.sin(x));
     const turboTime = Date.now() - turboStart;
     
     console.log(`  📊 10K items: ${turboTime}ms, ${stats.workersUsed} workers, speedup: ${stats.speedupRatio}`);
@@ -3268,8 +3275,8 @@ async function runTests(): Promise<void> {
     // Turbo mode
     const turboStart = Date.now();
     const { stats } = await beeThreads
-      .turbo((x: number) => Math.sqrt(x) * Math.sin(x))
-      .mapWithStats(data);
+      .turbo(data as any)
+      .mapWithStats((x: number) => Math.sqrt(x) * Math.sin(x));
     const turboTime = Date.now() - turboStart;
     
     console.log(`  📊 100K items: ${turboTime}ms, ${stats.workersUsed} workers, speedup: ${stats.speedupRatio}`);
@@ -3285,8 +3292,8 @@ async function runTests(): Promise<void> {
     
     const start = Date.now();
     const result = await beeThreads
-      .turbo((x: number) => x % 2 === 0)
-      .filter(data);
+      .turbo(data)
+      .filter((x: number) => x % 2 === 0);
     const elapsed = Date.now() - start;
     
     console.log(`  📊 Filter 50K items: ${elapsed}ms, result: ${result.length} items`);
@@ -3301,8 +3308,8 @@ async function runTests(): Promise<void> {
     
     const start = Date.now();
     const result = await beeThreads
-      .turbo((a: number, b: number) => a + b)
-      .reduce(data, 0);
+      .turbo(data)
+      .reduce((a: number, b: number) => a + b, 0);
     const elapsed = Date.now() - start;
     
     const expected = (size * (size + 1)) / 2; // Sum formula
@@ -3317,14 +3324,14 @@ async function runTests(): Promise<void> {
   await test('ISOLATION: bee() works normally after turbo() calls', async () => {
     // Run turbo
     const turboData = [1, 2, 3, 4, 5];
-    await beeThreads.turbo((x: number) => x * 2, { force: true }).map(turboData);
+    await beeThreads.turbo(turboData, { force: true }).map((x: number) => x * 2);
     
     // Now run normal bee() - should work exactly the same
     const normalResult = await bee((a: number, b: number) => a + b)(5, 10);
     assert.strictEqual(normalResult, 15, 'Normal bee() must work after turbo');
     
     // Another turbo
-    await beeThreads.turbo((x: number) => x * 3, { force: true }).map(turboData);
+    await beeThreads.turbo(turboData, { force: true }).map((x: number) => x * 3);
     
     // And another normal bee()
     const normalResult2 = await bee((x: number) => x * x)(7);
@@ -3336,9 +3343,9 @@ async function runTests(): Promise<void> {
     const results: (number | number[])[] = [];
     
     results.push(await bee((x: number) => x + 1)(1)); // 2
-    results.push(await beeThreads.turbo((x: number) => x * 2, { force: true }).map([1, 2])); // [2, 4]
+    results.push(await beeThreads.turbo([1, 2], { force: true }).map((x: number) => x * 2)); // [2, 4]
     results.push(await bee((x: number) => x * 3)(3)); // 9
-    results.push(await beeThreads.turbo((x: number) => x + 10, { force: true }).map([1])); // [11]
+    results.push(await beeThreads.turbo([1], { force: true }).map((x: number) => x + 10)); // [11]
     results.push(await bee((a: number, b: number) => a - b)(10, 3)); // 7
     
     assert.strictEqual(results[0], 2, 'First bee() correct');
@@ -3351,7 +3358,7 @@ async function runTests(): Promise<void> {
   await test('ISOLATION: concurrent turbo and bee() execution', async () => {
     // Run turbo and bee() concurrently - must not interfere
     const [turboResult, beeResult1, beeResult2] = await Promise.all([
-      beeThreads.turbo((x: number) => x * 2, { force: true }).map([1, 2, 3, 4, 5]),
+      beeThreads.turbo([1, 2, 3, 4, 5], { force: true }).map((x: number) => x * 2),
       bee((x: number) => x + 100)(5),
       bee((a: number, b: number) => a * b)(6, 7)
     ]);
@@ -3366,7 +3373,7 @@ async function runTests(): Promise<void> {
     const workersBefore = statsBefore.workers;
     
     // Run turbo
-    await beeThreads.turbo((x: number) => x * 2, { force: true }).map([1, 2, 3, 4, 5]);
+    await beeThreads.turbo([1, 2, 3, 4, 5], { force: true }).map((x: number) => x * 2);
     
     // Run normal
     await bee((x: number) => x + 1)(5);
@@ -3385,10 +3392,10 @@ async function runTests(): Promise<void> {
     
     await assert.rejects(
       async () => {
-        await beeThreads.turbo((x: number) => {
+        await beeThreads.turbo(data, { force: true }).map((x: number) => {
           if (x === 3) throw new Error('Intentional error at item 3');
           return x * 2;
-        }, { force: true }).map(data);
+        });
       },
       /Intentional error|Turbo/,
       'Should reject with worker error'
@@ -3400,7 +3407,7 @@ async function runTests(): Promise<void> {
     
     await assert.rejects(
       async () => {
-        await beeThreads.turbo((x: any) => x.toFixed(2), { force: true }).map(data);
+        await beeThreads.turbo(data as any, { force: true }).map((x: any) => x.toFixed(2));
       },
       /toFixed|Cannot|null|undefined|Turbo/i,
       'Should reject with TypeError'
@@ -3410,9 +3417,9 @@ async function runTests(): Promise<void> {
   await test('ERROR: bee() works normally after turbo error', async () => {
     // First, make turbo fail
     try {
-      await beeThreads.turbo((x: number) => {
+      await beeThreads.turbo([1, 2, 3], { force: true }).map((x: number) => {
         throw new Error('Turbo failed');
-      }, { force: true }).map([1, 2, 3]);
+      });
     } catch {
       // Expected
     }
@@ -3425,9 +3432,9 @@ async function runTests(): Promise<void> {
   await test('ERROR: multiple turbo errors in sequence', async () => {
     for (let i = 0; i < 3; i++) {
       try {
-        await beeThreads.turbo((x: number) => {
+        await beeThreads.turbo([1, 2], { force: true }).map((x: number) => {
           throw new Error(`Error ${i}`);
-        }, { force: true }).map([1, 2]);
+        });
       } catch (err) {
         assert.ok(err instanceof Error, 'Should be Error instance');
       }
@@ -3443,6 +3450,7 @@ async function runTests(): Promise<void> {
 
   await test('RACE: many concurrent turbo calls', async () => {
     const promises: Promise<number[]>[] = [];
+    const data = [1, 2, 3];
     
     // Use different pure functions (no closure capture) to avoid context issues
     const fns = [
@@ -3460,7 +3468,7 @@ async function runTests(): Promise<void> {
     
     for (let i = 0; i < 10; i++) {
       promises.push(
-        beeThreads.turbo(fns[i], { force: true }).map([1, 2, 3])
+        beeThreads.turbo(data, { force: true }).map(fns[i])
       );
     }
     
@@ -3479,7 +3487,7 @@ async function runTests(): Promise<void> {
     // Mix turbo and bee calls
     for (let i = 0; i < 20; i++) {
       if (i % 2 === 0) {
-        promises.push(beeThreads.turbo((x: number) => x * 2, { force: true }).map([i]));
+        promises.push(beeThreads.turbo([i], { force: true }).map((x: number) => x * 2));
       } else {
         promises.push(bee((x: number) => x * 3)(i));
       }
@@ -3508,10 +3516,10 @@ async function runTests(): Promise<void> {
     
     for (let run = 0; run < 5; run++) {
       try {
-        await beeThreads.turbo((x: number) => {
+        await beeThreads.turbo([1, 2, 3, 4, 5], { force: true }).map((x: number) => {
           if (Math.random() < 0.3) throw new Error('Random chaos');
           return x * 2;
-        }, { force: true }).map([1, 2, 3, 4, 5]);
+        });
       } catch {
         errorCount++;
       }
@@ -3525,14 +3533,13 @@ async function runTests(): Promise<void> {
   await test('CHAOS: stress test rapid sequential turbo calls', async () => {
     const iterations = 20;
     let successCount = 0;
+    const data = [1, 2, 3];
     
     // Use inline math to avoid context/cache issues
     for (let i = 0; i < iterations; i++) {
       try {
         // Pure function with no context dependency
-        const result = await beeThreads.turbo((x: number) => x * 2 + 1, { 
-          force: true
-        }).map([1, 2, 3]);
+        const result = await beeThreads.turbo(data, { force: true }).map((x: number) => x * 2 + 1);
         if (result.length === 3 && result[0] === 3) successCount++;
       } catch (err) {
         console.log(`    Iteration ${i} failed: ${(err as Error).message}`);
@@ -3548,7 +3555,7 @@ async function runTests(): Promise<void> {
     const normalResult = await bee((a: number, b: number) => a + b)(10, 20);
     assert.strictEqual(normalResult, 30, 'System recovered from chaos');
     
-    const turboResult = await beeThreads.turbo((x: number) => x * 10, { force: true }).map([1, 2, 3]);
+    const turboResult = await beeThreads.turbo([1, 2, 3], { force: true }).map((x: number) => x * 10);
     assert.deepStrictEqual(turboResult, [10, 20, 30], 'Turbo works after chaos');
   });
 
@@ -3560,8 +3567,8 @@ async function runTests(): Promise<void> {
     const beeCtx = { offset: 100 };
     
     const turboResult = await beeThreads
-      .turbo((x: number) => x * multiplier, { force: true, context: turboCtx })
-      .map([1, 2, 3]);
+      .turbo([1, 2, 3], { force: true, context: turboCtx })
+      .map((x: number) => x * multiplier);
     
     const beeResult = await beeThreads
       .run((x: number) => x + offset)
@@ -3577,7 +3584,7 @@ async function runTests(): Promise<void> {
     beeThreads.resetCoalescingStats();
     
     // Run turbo
-    await beeThreads.turbo((x: number) => x * 2, { force: true }).map([1, 2, 3]);
+    await beeThreads.turbo([1, 2, 3], { force: true }).map((x: number) => x * 2);
     
     // Coalescing should still work for normal calls
     const slowFn = async (x: number) => {
@@ -3594,9 +3601,9 @@ async function runTests(): Promise<void> {
 
   await test('COEXIST: turbo does not break worker affinity', async () => {
     // Run same function multiple times via turbo
-    const fn = (x: number) => x * 2;
+    const data = [1, 2, 3];
     for (let i = 0; i < 5; i++) {
-      await beeThreads.turbo(fn, { force: true }).map([1, 2, 3]);
+      await beeThreads.turbo(data, { force: true }).map((x: number) => x * 2);
     }
     
     // Now run same function via normal bee() - affinity should work
@@ -3620,8 +3627,9 @@ async function runTests(): Promise<void> {
     const baselineTime = Date.now() - baselineStart;
     
     // Use turbo heavily
+    const turboData = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     for (let i = 0; i < 10; i++) {
-      await beeThreads.turbo((x: number) => x * x, { force: true }).map([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      await beeThreads.turbo(turboData, { force: true }).map((x: number) => x * x);
     }
     
     // Measure bee() time after turbo
@@ -3647,8 +3655,8 @@ async function runTests(): Promise<void> {
     // Measure turbo
     const turboStart = Date.now();
     const { stats } = await beeThreads
-      .turbo((x: number) => Math.sqrt(x) * Math.sin(x))
-      .mapWithStats(data);
+      .turbo(data as any)
+      .mapWithStats((x: number) => Math.sqrt(x) * Math.sin(x));
     const turboTime = Date.now() - turboStart;
     
     console.log(`  📊 Turbo 20K: ${turboTime}ms, workers: ${stats.workersUsed}, speedup: ${stats.speedupRatio}`);

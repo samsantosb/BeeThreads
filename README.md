@@ -232,9 +232,9 @@ await beeThreads
 Process large arrays across **ALL CPU cores** with **fail-fast** error handling.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  beeThreads.turbo(fn).map([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) │
-└─────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│  beeThreads.turbo([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).map(fn)   │
+└───────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
         ┌─────────────────────────────────────────┐
@@ -263,24 +263,24 @@ Process large arrays across **ALL CPU cores** with **fail-fast** error handling.
 
 ```js
 // Map
-const squares = await beeThreads.turbo(x => x * x).map(numbers)
+const squares = await beeThreads.turbo(numbers).map(x => x * x)
 
 // Filter
-const evens = await beeThreads.turbo(x => x % 2 === 0).filter(numbers)
+const evens = await beeThreads.turbo(numbers).filter(x => x % 2 === 0)
 
 // Reduce
-const sum = await beeThreads.turbo((a, b) => a + b).reduce(numbers, 0)
+const sum = await beeThreads.turbo(numbers).reduce((a, b) => a + b, 0)
 
-// TypedArray (SharedArrayBuffer - 4x faster!)
+// TypedArray (SharedArrayBuffer - zero-copy!)
 const pixels = new Float64Array(1_000_000)
-const bright = await beeThreads.turbo(x => Math.min(255, x * 1.2)).map(pixels)
+const bright = await beeThreads.turbo(pixels).map(x => Math.min(255, x * 1.2))
 
 // With context
 const factor = 2.5
-await beeThreads.turbo(x => x * factor, { context: { factor } }).map(data)
+await beeThreads.turbo(data, { context: { factor } }).map(x => x * factor)
 
 // With stats
-const { data, stats } = await beeThreads.turbo(x => x * x).mapWithStats(arr)
+const { data, stats } = await beeThreads.turbo(arr).mapWithStats(x => x * x)
 console.log(stats.speedupRatio) // "7.2x"
 ```
 
@@ -290,8 +290,8 @@ console.log(stats.speedupRatio) // "7.2x"
 // 🖼️ Image: Grayscale conversion (1920x1080 = 2M pixels)
 const imageBuffer = new Uint8Array(rawPixelData)
 const grayscale = await beeThreads
-	.turbo(v => Math.round(v * 0.299)) // Simplified grayscale
-	.map(imageBuffer)
+	.turbo(imageBuffer)
+	.map(v => Math.round(v * 0.299)) // Simplified grayscale
 
 // 🎬 Video: Process frames with generator (memory efficient)
 const stream = beeThreads.stream(function* (videoPath) {
@@ -308,7 +308,7 @@ for await (const processedFrame of stream) {
 // 🔥 Batch process video frames with turbo
 const frames = extractFrames('video.mp4') // Array of Uint8Array
 const processed = await Promise.all(
-	frames.map(frame => beeThreads.turbo(px => px * 1.2).map(frame))
+	frames.map(frame => beeThreads.turbo(frame).map(px => px * 1.2))
 )
 ```
 
