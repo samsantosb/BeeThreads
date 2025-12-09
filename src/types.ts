@@ -170,7 +170,7 @@ export interface QueuedTask {
   fnString: string;
   args: unknown[];
   context: Record<string, unknown> | null;
-  transfer: ArrayBuffer[];
+  transfer: ArrayBufferLike[];
   resolve: (info: WorkerInfo) => void;
   reject: (error: Error) => void;
   priority: Priority;
@@ -192,7 +192,7 @@ export interface ExecutionOptions {
   safe?: boolean;
   timeout?: number | null;
   poolType?: PoolType;
-  transfer?: ArrayBuffer[];
+  transfer?: ArrayBufferLike[];
   signal?: AbortSignal | null;
   context?: Record<string, unknown> | null;
   priority?: Priority;

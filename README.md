@@ -146,23 +146,95 @@ const TAX = 0.2
 await beeThreads.run(p => p * (1 + TAX)).usingParams(100).setContext({ TAX }).execute() // → 120
 ```
 
-### `.signal(AbortSignal)` / `.retry(options)` / `.priority(level)` / `.transfer([ArrayBuffer])`
+### `.signal(AbortSignal)` - Cancellation
+
+Cancel long-running tasks from outside the worker:
 
 ```js
-// Cancellation
-const ctrl = new AbortController()
-await beeThreads.run(() => longTask()).signal(ctrl.signal).execute()
+const { AbortError } = require('bee-threads')
 
-// Auto-retry
-await beeThreads.run(() => unstableApi()).retry({ maxAttempts: 3, baseDelay: 100 }).execute()
+const controller = new AbortController()
 
-// Priority ('high' | 'normal' | 'low')
-await beeThreads.run(() => critical()).priority('high').execute()
+// Start a long task
+const promise = beeThreads
+  .run(() => {
+    let sum = 0
+    for (let i = 0; i < 1e10; i++) sum += i  // Very long loop
+    return sum
+  })
+  .signal(controller.signal)
+  .execute()
 
-// Zero-copy binary transfer
-const buf = new ArrayBuffer(1024)
-await beeThreads.run(b => process(b)).usingParams(buf).transfer([buf]).execute()
+// Cancel after 100ms
+setTimeout(() => controller.abort(), 100)
+
+try {
+  await promise
+} catch (err) {
+  if (err instanceof AbortError) {
+    console.log('Task was cancelled!')  // ← This runs
+  }
+}
 ```
+
+### `.retry(options)` - Auto-retry with Exponential Backoff
+
+Automatically retry failed tasks with configurable backoff:
+
+```js
+// Retry flaky API calls
+const data = await beeThreads
+  .run(() => {
+    const res = require('https').get('https://flaky-api.com/data')
+    if (Math.random() < 0.5) throw new Error('Random failure')
+    return res
+  })
+  .retry({
+    maxAttempts: 5,      // Try up to 5 times (default: 3)
+    baseDelay: 100,      // Start with 100ms delay (default: 100)
+    maxDelay: 5000,      // Cap delay at 5s (default: 5000)
+    backoffFactor: 2     // Double delay each retry (default: 2)
+  })
+  .execute()
+
+// Delays: 100ms → 200ms → 400ms → 800ms → 1600ms (capped at maxDelay)
+```
+
+### `.priority('high' | 'normal' | 'low')` - Task Priority
+
+Control execution order when the queue has pending tasks:
+
+```js
+// Critical tasks jump the queue
+await beeThreads.run(() => processPayment()).priority('high').execute()
+
+// Background tasks wait for others
+await beeThreads.run(() => generateReport()).priority('low').execute()
+
+// Default priority
+await beeThreads.run(() => normalTask()).priority('normal').execute()
+```
+
+Queue order: `high` → `normal` → `low`. Same-priority tasks execute in FIFO order.
+
+### `.transfer([ArrayBuffer])` - Zero-copy Binary Transfer
+
+Transfer ownership of ArrayBuffers to avoid copying large data:
+
+```js
+// ❌ WITHOUT transfer: Buffer is COPIED (slow for large data)
+const buf = new ArrayBuffer(10 * 1024 * 1024)  // 10MB
+await beeThreads.run(b => process(b)).usingParams(buf).execute()
+// buf is still usable here, but 10MB was copied to worker
+
+// ✅ WITH transfer: Buffer is MOVED (zero-copy, instant)
+const buf2 = new ArrayBuffer(10 * 1024 * 1024)  // 10MB
+await beeThreads.run(b => process(b)).usingParams(buf2).transfer([buf2]).execute()
+// buf2 is now "neutered" (unusable) - ownership transferred to worker
+// console.log(buf2.byteLength)  // 0 - buffer was transferred!
+```
+
+**Use case:** Image/video processing, large file handling, WebAssembly memory.
 
 ---
 

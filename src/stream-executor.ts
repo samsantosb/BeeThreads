@@ -59,7 +59,7 @@ interface StreamExecutorState {
   fnString: string;
   context: Record<string, unknown> | null;
   args: unknown[];
-  transfer: ArrayBuffer[];
+  transfer: ArrayBufferLike[];
 }
 
 /** Stream result type - ReadableStream that is also async iterable */
@@ -68,7 +68,7 @@ export type StreamResult<T> = ReadableStream<T> & AsyncIterable<T> & { returnVal
 export interface StreamExecutor<T = unknown> {
   usingParams(...params: unknown[]): StreamExecutor<T>;
   setContext(ctx: Record<string, unknown>): StreamExecutor<T>;
-  transfer(list: ArrayBuffer[]): StreamExecutor<T>;
+  transfer(list: ArrayBufferLike[]): StreamExecutor<T>;
   execute(): StreamResult<T>;
 }
 
@@ -130,7 +130,7 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
     /**
      * Specifies transferable objects for zero-copy transfer.
      */
-    transfer(list: ArrayBuffer[]): StreamExecutor<T> {
+    transfer(list: ArrayBufferLike[]): StreamExecutor<T> {
       return createStreamExecutor<T>({
         fnString,
         context,
@@ -261,8 +261,9 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
             });
 
             const message = { fn: fnString, args, context };
+            // Cast needed: ArrayBufferLike includes SharedArrayBuffer which is already shared, not transferred
             transfer.length > 0
-              ? streamWorker.postMessage(message, transfer)
+              ? streamWorker.postMessage(message, transfer as ArrayBuffer[])
               : streamWorker.postMessage(message);
           } catch (err) {
             controller.error(err);

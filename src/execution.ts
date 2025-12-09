@@ -283,7 +283,8 @@ export async function executeOnce<T = unknown>(
     worker.on('exit', onExit);
 
     const message = { fn: fnString, args, context };
-    transfer.length > 0 ? worker.postMessage(message, transfer) : worker.postMessage(message);
+    // Cast needed: ArrayBufferLike includes SharedArrayBuffer which is already shared, not transferred
+    transfer.length > 0 ? worker.postMessage(message, transfer as ArrayBuffer[]) : worker.postMessage(message);
   });
 }
 

@@ -59,7 +59,7 @@ export interface Executor<T = unknown> {
   usingParams(...params: unknown[]): Executor<T>;
   setContext(context: Record<string, unknown>): Executor<T>;
   signal(abortSignal: AbortSignal): Executor<T>;
-  transfer(list: ArrayBuffer[]): Executor<T>;
+  transfer(list: ArrayBufferLike[]): Executor<T>;
   retry(retryOptions?: RetryOptions): Executor<T>;
   priority(level: Priority): Executor<T>;
   noCoalesce(): Executor<T>;
@@ -139,7 +139,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
     /**
      * Specifies transferable objects for zero-copy transfer.
      */
-    transfer(list: ArrayBuffer[]): Executor<T> {
+    transfer(list: ArrayBufferLike[]): Executor<T> {
       return createExecutor<T>({
         fnString,
         options: { ...options, transfer: list },
