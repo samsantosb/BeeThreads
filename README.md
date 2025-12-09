@@ -218,8 +218,9 @@ const mask = new Uint8Array(maskData)
 const options = { width: 800, quality: 90 }
 
 await beeThreads
-  .run((img, msk, opts) => processImage(img, msk, opts))
+  .run((img, msk, opts) => processImage(img, msk, opts, SHARP_OPTIONS))
   .usingParams(image, mask, options)
+  .setContext({ SHARP_OPTIONS: { fit: 'cover' } })
   .transfer([image.buffer, mask.buffer])
   .execute()
 ```

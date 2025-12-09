@@ -3,7 +3,16 @@
   "version": "3.4.12",
   "description": "Handle threading as promises. Run CPU-intensive code in worker threads with a simple fluent API.",
   "main": "dist/index.js",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "files": [
     "dist",
     "LICENSE",
