@@ -23,6 +23,7 @@
 
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs';
 import type {
   PoolConfig,
   WorkerEntry,
@@ -31,22 +32,119 @@ import type {
   Metrics,
   PoolType
 } from './types';
+import {
+  INLINE_WORKER_CODE,
+  INLINE_GENERATOR_WORKER_CODE,
+  createWorkerDataUrl
+} from './inline-workers';
 
 // ============================================================================
 // WORKER SCRIPTS
 // ============================================================================
 
 /**
+ * Detects the current JavaScript runtime.
+ * @internal
+ */
+export type Runtime = 'node' | 'bun' | 'deno';
+
+/**
+ * Detects which runtime we're running on.
+ * @internal
+ */
+export function detectRuntime(): Runtime {
+  if (typeof (globalThis as any).Bun !== 'undefined') {
+    return 'bun';
+  }
+  if (typeof (globalThis as any).Deno !== 'undefined') {
+    return 'deno';
+  }
+  return 'node';
+}
+
+/**
+ * Current runtime (cached at module load).
+ * @internal
+ */
+export const RUNTIME = detectRuntime();
+
+/**
+ * Whether we're running in Bun.
+ * @internal
+ */
+export const IS_BUN = RUNTIME === 'bun';
+
+/**
+ * Detects if running in bundler environment (webpack, vite, rspack, etc).
+ * 
+ * Bundlers typically don't include worker .js files, so we need inline workers.
+ * This detection happens once at module load.
+ * 
+ * @internal
+ */
+function detectBundlerMode(): boolean {
+  // Check 1: Worker file doesn't exist (bundled scenario)
+  const workerPath = path.join(__dirname, 'worker.js');
+  try {
+    if (!fs.existsSync(workerPath)) {
+      return true;
+    }
+  } catch {
+    // fs operations failed - likely bundled
+    return true;
+  }
+  
+  // Check 2: Known bundler globals
+  if (
+    typeof (globalThis as any).__webpack_require__ !== 'undefined' ||
+    typeof (globalThis as any).__vite_ssr_import__ !== 'undefined' ||
+    typeof (globalThis as any).__rspack_require__ !== 'undefined'
+  ) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * Whether to use inline workers (bundler mode) or file workers (normal mode).
+ * @internal
+ */
+const USE_INLINE_WORKERS = detectBundlerMode();
+
+/**
+ * Returns the worker script path/URL for the given pool type.
+ * 
+ * In bundler mode: returns data: URL with inline worker code
+ * In normal mode: returns path to worker.js file
+ * 
+ * @internal
+ */
+export function getWorkerScript(type: PoolType): string {
+  if (USE_INLINE_WORKERS) {
+    const code = type === 'generator' 
+      ? INLINE_GENERATOR_WORKER_CODE 
+      : INLINE_WORKER_CODE;
+    return createWorkerDataUrl(code);
+  }
+  
+  return type === 'generator'
+    ? path.join(__dirname, 'generator-worker.js')
+    : path.join(__dirname, 'worker.js');
+}
+
+/**
  * Paths to worker thread scripts.
  *
  * Two separate scripts exist because regular functions and generators
  * have different communication patterns with the main thread.
- *
+ * 
+ * @deprecated Use getWorkerScript() instead for bundler compatibility.
  * @internal
  */
 export const SCRIPTS: Record<PoolType, string> = {
-  normal: path.join(__dirname, 'worker.js'),
-  generator: path.join(__dirname, 'generator-worker.js')
+  get normal() { return getWorkerScript('normal'); },
+  get generator() { return getWorkerScript('generator'); }
 };
 
 // ============================================================================
@@ -126,7 +224,17 @@ export const config: PoolConfig = {
    * Default: console
    * Set to null to disable logging.
    */
-  logger: console as PoolConfig['logger']
+  logger: console as PoolConfig['logger'],
+
+  /**
+   * Security configuration (transparent - doesn't affect normal usage).
+   */
+  security: {
+    // 1MB max function size - prevents DoS via huge functions
+    maxFunctionSize: 1024 * 1024,
+    // Block prototype pollution attacks
+    blockPrototypePollution: true
+  }
 };
 
 // ============================================================================

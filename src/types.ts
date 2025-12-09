@@ -58,6 +58,23 @@ export interface RetryConfig {
   backoffFactor: number;
 }
 
+/** Security configuration (transparent - doesn't affect normal usage) */
+export interface SecurityConfig {
+  /**
+   * Maximum function source code size in bytes.
+   * Prevents DoS attacks via extremely large functions.
+   * @default 1048576 (1MB)
+   */
+  maxFunctionSize: number;
+  
+  /**
+   * Block prototype pollution attacks.
+   * Prevents __proto__, constructor, prototype keys in context.
+   * @default true
+   */
+  blockPrototypePollution: boolean;
+}
+
 /** Global pool configuration */
 export interface PoolConfig {
   poolSize: number;
@@ -81,6 +98,10 @@ export interface PoolConfig {
    * null = logging disabled
    */
   logger: Logger | null;
+  /**
+   * Security configuration for worker execution.
+   */
+  security: SecurityConfig;
 }
 
 /** User-configurable options (all optional) */
@@ -110,6 +131,10 @@ export interface ConfigureOptions {
    * @default true
    */
   coalescing?: boolean;
+  /**
+   * Security options (transparent - doesn't affect normal usage).
+   */
+  security?: Partial<SecurityConfig>;
 }
 
 // ============================================================================
@@ -422,6 +447,36 @@ export type AsyncWorkerFunction<TArgs extends unknown[] = unknown[], TReturn = u
 export type GeneratorWorkerFunction<TArgs extends unknown[] = unknown[], TYield = unknown, TReturn = unknown> = (
   ...args: TArgs
 ) => Generator<TYield, TReturn, unknown>;
+
+// ============================================================================
+// SAFE RESULT TYPES
+// ============================================================================
+
+/** Successful safe result - status discriminates the union */
+export interface SafeFulfilled<T> {
+  status: 'fulfilled';
+  value: T;
+}
+
+/** Failed safe result - status discriminates the union */
+export interface SafeRejected {
+  status: 'rejected';
+  error: Error;
+}
+
+/**
+ * Discriminated union for safe mode results.
+ * Use with `status` property for type narrowing:
+ * 
+ * @example
+ * const result = await execute(fn, args, { safe: true });
+ * if (result.status === 'fulfilled') {
+ *   console.log(result.value); // T
+ * } else {
+ *   console.log(result.error); // Error
+ * }
+ */
+export type SafeResult<T> = SafeFulfilled<T> | SafeRejected;
 
 // ============================================================================
 // CACHE TYPES

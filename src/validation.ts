@@ -87,3 +87,51 @@ export function validateClosure(obj: unknown): asserts obj is Record<string, unk
   }
 }
 
+// ============================================================================
+// SECURITY VALIDATION
+// ============================================================================
+
+/**
+ * Validates function source size against max limit.
+ * Prevents DoS attacks via extremely large function strings.
+ *
+ * @param fnString - Function source code
+ * @param maxSize - Maximum allowed size in bytes
+ * @throws {RangeError} When function exceeds size limit
+ */
+export function validateFunctionSize(fnString: string, maxSize: number): void {
+  const size = Buffer.byteLength(fnString, 'utf8');
+  if (size > maxSize) {
+    throw new RangeError(
+      `Function source exceeds maximum size (${size} bytes > ${maxSize} bytes limit)`
+    );
+  }
+}
+
+/**
+ * Validates context object for prototype pollution attacks.
+ * Blocks __proto__, constructor, prototype keys.
+ *
+ * @param context - Context object to validate
+ * @throws {TypeError} When dangerous keys are detected
+ */
+export function validateContextSecurity(context: Record<string, unknown>): void {
+  // Check for __proto__ explicitly (Object.keys doesn't return it)
+  if (Object.prototype.hasOwnProperty.call(context, '__proto__')) {
+    throw new TypeError(
+      `Context key "__proto__" is not allowed (potential prototype pollution)`
+    );
+  }
+  
+  // Check other dangerous keys
+  const keys = Object.keys(context);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (key === 'constructor' || key === 'prototype') {
+      throw new TypeError(
+        `Context key "${key}" is not allowed (potential prototype pollution)`
+      );
+    }
+  }
+}
+

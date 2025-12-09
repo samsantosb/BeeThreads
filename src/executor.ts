@@ -40,7 +40,7 @@
 
 import { config } from './config';
 import { execute } from './execution';
-import { validateFunction } from './validation';
+import { validateFunction, validateFunctionSize, validateContextSecurity } from './validation';
 import type { Priority, ExecutionOptions, RetryOptions } from './types';
 
 // ============================================================================
@@ -95,6 +95,12 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       if (typeof context !== 'object' || context === null) {
         throw new TypeError('setContext() requires a non-null object');
       }
+      
+      // Security: Block prototype pollution attacks
+      if (config.security.blockPrototypePollution) {
+        validateContextSecurity(context);
+      }
+      
       // Validate that context doesn't contain non-serializable values
       const contextKeys = Object.keys(context);
       for (let i = 0, len = contextKeys.length; i < len; i++) {
@@ -214,16 +220,26 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
 // CURRIED RUNNER FACTORY
 // ============================================================================
 
+/** Any callable function type */
+type AnyFunction = (...args: any[]) => any;
+
 /**
  * Creates a runner function with preset base options.
+ * Type inference extracts ReturnType from the function automatically.
  */
-export function createCurriedRunner<T = unknown>(
+export function createCurriedRunner(
   baseOptions: ExecutionOptions = {}
-): (fn: Function) => Executor<T> {
-  return function run(fn: Function): Executor<T> {
+): <T extends AnyFunction>(fn: T) => Executor<ReturnType<T>> {
+  return function run<T extends AnyFunction>(fn: T): Executor<ReturnType<T>> {
     validateFunction(fn);
-    return createExecutor<T>({
-      fnString: fn.toString(),
+    
+    const fnString = fn.toString();
+    
+    // Security: Validate function size (DoS prevention)
+    validateFunctionSize(fnString, config.security.maxFunctionSize);
+    
+    return createExecutor<ReturnType<T>>({
+      fnString,
       options: baseOptions,
       args: []
     });
