@@ -4,16 +4,12 @@ on:
   push:
     branches:
       - main
-    # Ignora commits feitos pelo próprio bot para evitar loop infinito
-    paths-ignore:
-      - 'package.json'
-      - 'package-lock.json'
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Previne execução em commits do bot
-    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, 'chore: bump version')"
+    # Previne execução em commits do bot (evita loop infinito)
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
     
     permissions:
       contents: write
@@ -45,7 +41,6 @@ jobs:
       - name: Bump version (patch)
         id: version
         run: |
-          # Bump patch version
           NEW_VERSION=$(npm version patch --no-git-tag-version)
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumped to $NEW_VERSION"
@@ -68,4 +63,3 @@ jobs:
         run: |
           git tag ${{ steps.version.outputs.new_version }}
           git push origin ${{ steps.version.outputs.new_version }}
-
