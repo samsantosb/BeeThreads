@@ -204,14 +204,16 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
      */
     get(key: string): T | undefined {     
       const entry = cache.get(key);
-      if(entry === undefined) return undefined;
+      if (entry === undefined) return undefined;
 
       // Entry expired. If ttl isn't set, it never expires
-      if (entry.expiresAt && (Date.now() >= entry.expiresAt)) {
+      if (entry.expiresAt && Date.now() >= entry.expiresAt) {
         return this.delete(key, entry), undefined;
       }
 
-      // Move to end (most recent) by re-inserting. Keeping original timeout (entry.timeoutId)
+      // Move to end (most recent) by deleting and re-inserting
+      // Use internal Map operations to preserve the same entry (including timeoutId)
+      // This maintains "absolute TTL" - entry expires at original time, not sliding
       cache.delete(key);
       cache.set(key, entry);
 
