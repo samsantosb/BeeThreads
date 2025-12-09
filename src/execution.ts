@@ -333,14 +333,15 @@ export async function execute<T = unknown>(
       }
     }
 
-    // All attempts failed
-    if (safe) return { status: 'rejected', error: lastError };
-    throw lastError;
+    // All attempts failed (lastError is guaranteed to be set if we reach here)
+    const finalError = lastError ?? new Error('All retry attempts failed');
+    if (safe) return { status: 'rejected', error: finalError };
+    throw finalError;
   };
 
   // Apply coalescing if appropriate
   if (shouldCoalesce) {
-    return coalesce<T | SafeResult<T>>(
+    return await coalesce<T | SafeResult<T>>(
       fnString,
       args,
       context,
@@ -348,12 +349,7 @@ export async function execute<T = unknown>(
       skipCoalescing
     );
   }
-  
-  executeWithRetry();
 
-  // All attempts failed (lastError is guaranteed to be set if we reach here)
-  const finalError = lastError ?? new Error('All retry attempts failed');
-  if (safe) return { status: 'rejected', error: finalError };
-  throw finalError;
+  return await executeWithRetry();
 }
 
