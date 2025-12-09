@@ -771,16 +771,16 @@ async function runTests(): Promise<void> {
   });
 
   await test('setContext() works with stream/generators', async () => {
-    const multiplier = 2;
+    const ctxMultiplier = 2;
     
     const stream = beeThreads
-      .stream(function* (n: number) {
-        for (let i = 1; i <= n; i++) {
-          yield i * multiplier;
+      .stream(function* (count: number) {
+        for (let idx = 1; idx <= count; idx++) {
+          yield idx * ctxMultiplier;
         }
       })
       .usingParams(3)
-      .setContext({ multiplier })
+      .setContext({ ctxMultiplier })
       .execute();
     
     const chunks: number[] = [];
@@ -3662,6 +3662,49 @@ async function runTests(): Promise<void> {
 
   await beeThreads.shutdown();
 
+  // ---------- INLINE WORKERS VALIDATION ----------
+  section('Inline Workers (Bundler Compatibility)');
+
+  // Import inline worker code for validation
+  const { INLINE_WORKER_CODE, INLINE_GENERATOR_WORKER_CODE } = require('./dist/inline-workers');
+  const vm = require('vm');
+
+  await test('INLINE: worker code is valid JavaScript', () => {
+    // This will throw if syntax is invalid
+    new vm.Script(INLINE_WORKER_CODE, { filename: 'inline-worker.js' });
+    assert.ok(true, 'Worker code parsed successfully');
+  });
+
+  await test('INLINE: generator worker code is valid JavaScript', () => {
+    new vm.Script(INLINE_GENERATOR_WORKER_CODE, { filename: 'inline-generator.js' });
+    assert.ok(true, 'Generator worker code parsed successfully');
+  });
+
+  await test('INLINE: worker code includes turbo handler', () => {
+    assert.ok(INLINE_WORKER_CODE.includes('turbo_map'), 'Should handle turbo_map');
+    assert.ok(INLINE_WORKER_CODE.includes('turbo_filter'), 'Should handle turbo_filter');
+    assert.ok(INLINE_WORKER_CODE.includes('turbo_reduce'), 'Should handle turbo_reduce');
+    assert.ok(INLINE_WORKER_CODE.includes('turbo_complete'), 'Should send turbo_complete');
+    assert.ok(INLINE_WORKER_CODE.includes('turbo_error'), 'Should send turbo_error');
+  });
+
+  await test('INLINE: worker code includes SharedArrayBuffer support', () => {
+    assert.ok(INLINE_WORKER_CODE.includes('SharedArrayBuffer'), 'Should support SharedArrayBuffer');
+    assert.ok(INLINE_WORKER_CODE.includes('Float64Array'), 'Should support Float64Array');
+    assert.ok(INLINE_WORKER_CODE.includes('Atomics'), 'Should use Atomics');
+  });
+
+  await test('INLINE: worker code includes context/cache fix', () => {
+    // Verify the cache key includes context VALUES not just keys
+    assert.ok(INLINE_WORKER_CODE.includes('JSON.stringify(context)'), 
+      'Cache key should include full context values');
+  });
+
+  await test('INLINE: generator worker includes context/cache fix', () => {
+    assert.ok(INLINE_GENERATOR_WORKER_CODE.includes('JSON.stringify(context)'),
+      'Generator cache key should include full context values');
+  });
+
   // ---------- SUMMARY ----------
   console.log('\n' + '='.repeat(50));
   console.log(`\n📊 Results: ${passed} passed, ${failed} failed\n`);
@@ -3683,6 +3726,7 @@ declare const factor: number;
 declare const prefix: string;
 declare const label: string;
 declare const multiplier: number;
+declare const ctxMultiplier: number;
 declare const items: number[];
 declare const arr: number[];
 declare const PREFIX: string;

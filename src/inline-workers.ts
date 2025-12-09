@@ -84,7 +84,11 @@ function getBaseContext() {
 }
 
 function compile(src, context) {
-  const key = context ? src + JSON.stringify(Object.keys(context).sort()) : src;
+  // IMPORTANT: Cache key must include context VALUES, not just keys!
+  // Otherwise two calls with same function but different context values
+  // would incorrectly return the cached function compiled with old values.
+  const ctxKey = context ? JSON.stringify(context) : '';
+  const key = src + '::' + ctxKey;
   let fn = LOW_MEMORY ? null : cacheGet(key);
   if (fn) return fn;
 
@@ -177,7 +181,70 @@ function apply(fn, args) {
   return result;
 }
 
+// Turbo mode handler
+function handleTurbo(msg) {
+  const { type, fn: fnSrc, chunk, startIndex, endIndex, context, inputBuffer, outputBuffer, controlBuffer, initialValue, workerId } = msg;
+  
+  try {
+    const fn = compile(fnSrc, context);
+    if (typeof fn !== 'function') throw new TypeError('Turbo function failed to compile');
+    
+    // SharedArrayBuffer mode (TypedArrays)
+    if (inputBuffer && outputBuffer) {
+      const inputView = new Float64Array(inputBuffer);
+      const outputView = new Float64Array(outputBuffer);
+      const start = startIndex || 0;
+      const end = endIndex || inputView.length;
+      
+      if (type === 'turbo_map') {
+        for (let i = start; i < end; i++) {
+          outputView[i] = fn(inputView[i], i);
+        }
+      }
+      
+      if (controlBuffer) {
+        const ctrl = new Int32Array(controlBuffer);
+        Atomics.add(ctrl, 0, 1);
+        Atomics.notify(ctrl, 0);
+      }
+      
+      port.postMessage({ type: 'turbo_complete', workerId, itemsProcessed: end - start });
+      return;
+    }
+    
+    // Chunk mode (regular arrays)
+    if (chunk) {
+      let result;
+      if (type === 'turbo_map') {
+        result = new Array(chunk.length);
+        for (let i = 0; i < chunk.length; i++) result[i] = fn(chunk[i], i);
+      } else if (type === 'turbo_filter') {
+        result = [];
+        for (let i = 0; i < chunk.length; i++) if (fn(chunk[i], i)) result.push(chunk[i]);
+      } else if (type === 'turbo_reduce') {
+        let acc = initialValue;
+        for (let i = 0; i < chunk.length; i++) acc = fn(acc, chunk[i], i);
+        result = [acc];
+      } else {
+        throw new Error('Unknown turbo type: ' + type);
+      }
+      port.postMessage({ type: 'turbo_complete', workerId, result, itemsProcessed: chunk.length });
+      return;
+    }
+    
+    throw new Error('Turbo message missing chunk or SharedArrayBuffer');
+  } catch (e) {
+    port.postMessage({ type: 'turbo_error', workerId, error: serializeError(e), itemsProcessed: 0 });
+  }
+}
+
 port.on('message', (msg) => {
+  // Handle turbo messages
+  if (msg.type === 'turbo_map' || msg.type === 'turbo_filter' || msg.type === 'turbo_reduce') {
+    handleTurbo(msg);
+    return;
+  }
+  
   const { fn: src, args, context } = msg;
   currentFn = src;
   
@@ -276,7 +343,11 @@ function getBaseContext() {
 }
 
 function compile(src, context) {
-  const key = context ? src + JSON.stringify(Object.keys(context).sort()) : src;
+  // IMPORTANT: Cache key must include context VALUES, not just keys!
+  // Otherwise two calls with same function but different context values
+  // would incorrectly return the cached function compiled with old values.
+  const ctxKey = context ? JSON.stringify(context) : '';
+  const key = src + '::' + ctxKey;
   let fn = LOW_MEMORY ? null : cacheGet(key);
   if (fn) return fn;
 
