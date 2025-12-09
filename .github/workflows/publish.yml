@@ -1,0 +1,71 @@
+name: Auto Publish
+
+on:
+  push:
+    branches:
+      - main
+    # Ignora commits feitos pelo próprio bot para evitar loop infinito
+    paths-ignore:
+      - 'package.json'
+      - 'package-lock.json'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Previne execução em commits do bot
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, 'chore: bump version')"
+    
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Bump version (patch)
+        id: version
+        run: |
+          # Bump patch version
+          NEW_VERSION=$(npm version patch --no-git-tag-version)
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Bumped to $NEW_VERSION"
+
+      - name: Build
+        run: npm run build
+
+      - name: Commit and push version bump
+        run: |
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }} [skip ci]"
+          git push origin main
+
+      - name: Publish to NPM
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create Git tag
+        run: |
+          git tag ${{ steps.version.outputs.new_version }}
+          git push origin ${{ steps.version.outputs.new_version }}
+

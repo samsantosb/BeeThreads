@@ -253,15 +253,15 @@ const processed = await Promise.all(
 
 ### When to Use
 
-| Scenario | `bee()` | `turbo()` | `stream()` |
-| -------- | ------- | --------- | ---------- |
-| Single task | ✅ | ❌ | ❌ |
-| 10K+ items | ❌ | ✅ | ❌ |
-| TypedArray/Image | ❌ | ✅✅✅ | ❌ |
-| Video frames | ❌ | ✅ | ✅✅✅ |
-| Memory-constrained | ❌ | ❌ | ✅✅✅ |
+| Scenario | Best Choice | Why |
+| -------- | ----------- | --- |
+| Single heavy task | `bee()` | Simple, one worker |
+| Batch processing (10K+) | `turbo()` | Parallel across all cores |
+| TypedArray / Image | `turbo()` | SharedArrayBuffer, zero-copy |
+| Video / Large files | `stream()` | Memory efficient, yields as processed |
+| Real-time processing | `bee()` + `stream()` | Combine for best of both |
 
-> **Auto-fallback:** Arrays < 10K items automatically use single-worker mode.
+> **Auto-fallback:** `turbo()` with < 10K items automatically uses single-worker mode.
 
 ---
 
