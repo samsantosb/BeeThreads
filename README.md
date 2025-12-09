@@ -148,93 +148,81 @@ await beeThreads.run(p => p * (1 + TAX)).usingParams(100).setContext({ TAX }).ex
 
 ### `.signal(AbortSignal)` - Cancellation
 
-Cancel long-running tasks from outside the worker:
+Cancel long-running tasks from the outside:
 
 ```js
-const { AbortError } = require('bee-threads')
-
 const controller = new AbortController()
 
-// Start a long task
+// Start a heavy computation
 const promise = beeThreads
   .run(() => {
     let sum = 0
-    for (let i = 0; i < 1e10; i++) sum += i  // Very long loop
+    for (let i = 0; i < 1e10; i++) sum += i
     return sum
   })
   .signal(controller.signal)
   .execute()
 
-// Cancel after 100ms
-setTimeout(() => controller.abort(), 100)
-
-try {
-  await promise
-} catch (err) {
-  if (err instanceof AbortError) {
-    console.log('Task was cancelled!')  // ← This runs
-  }
-}
+// User clicks "Cancel" button
+cancelButton.onclick = () => controller.abort()
 ```
 
-### `.retry(options)` - Auto-retry with Exponential Backoff
+### `.retry(options)` - Auto-retry with Backoff
 
-Automatically retry failed tasks with configurable backoff:
+Retry failed tasks with exponential backoff:
 
 ```js
-// Retry flaky API calls
 const data = await beeThreads
-  .run(() => {
-    const res = require('https').get('https://flaky-api.com/data')
-    if (Math.random() < 0.5) throw new Error('Random failure')
-    return res
-  })
+  .run(() => fetchFromFlakyAPI())
   .retry({
-    maxAttempts: 5,      // Try up to 5 times (default: 3)
-    baseDelay: 100,      // Start with 100ms delay (default: 100)
-    maxDelay: 5000,      // Cap delay at 5s (default: 5000)
-    backoffFactor: 2     // Double delay each retry (default: 2)
+    maxAttempts: 5,    // Try up to 5 times
+    baseDelay: 100,    // Start with 100ms delay
+    maxDelay: 5000,    // Cap at 5 seconds
+    backoffFactor: 2   // Double delay each retry: 100 → 200 → 400 → 800...
   })
   .execute()
-
-// Delays: 100ms → 200ms → 400ms → 800ms → 1600ms (capped at maxDelay)
 ```
 
-### `.priority('high' | 'normal' | 'low')` - Task Priority
+### `.priority('high' | 'normal' | 'low')`
 
-Control execution order when the queue has pending tasks:
+Control execution order when workers are busy:
 
 ```js
-// Critical tasks jump the queue
+// Payment processing - jump the queue
 await beeThreads.run(() => processPayment()).priority('high').execute()
 
-// Background tasks wait for others
+// Report generation - can wait
 await beeThreads.run(() => generateReport()).priority('low').execute()
-
-// Default priority
-await beeThreads.run(() => normalTask()).priority('normal').execute()
 ```
 
-Queue order: `high` → `normal` → `low`. Same-priority tasks execute in FIFO order.
+### `.transfer([...buffers])` - Zero-copy Transfer
 
-### `.transfer([ArrayBuffer])` - Zero-copy Binary Transfer
-
-Transfer ownership of ArrayBuffers to avoid copying large data:
+Move large binary data to worker without copying:
 
 ```js
-// ❌ WITHOUT transfer: Buffer is COPIED (slow for large data)
-const buf = new ArrayBuffer(10 * 1024 * 1024)  // 10MB
-await beeThreads.run(b => process(b)).usingParams(buf).execute()
-// buf is still usable here, but 10MB was copied to worker
+// Process 10MB image - transferred instantly, not copied
+const imageBuffer = new ArrayBuffer(10 * 1024 * 1024)
 
-// ✅ WITH transfer: Buffer is MOVED (zero-copy, instant)
-const buf2 = new ArrayBuffer(10 * 1024 * 1024)  // 10MB
-await beeThreads.run(b => process(b)).usingParams(buf2).transfer([buf2]).execute()
-// buf2 is now "neutered" (unusable) - ownership transferred to worker
-// console.log(buf2.byteLength)  // 0 - buffer was transferred!
+await beeThreads
+  .run(buf => processImage(buf))
+  .usingParams(imageBuffer)
+  .transfer([imageBuffer])
+  .execute()
+
+// Note: imageBuffer is now empty (ownership moved to worker)
 ```
 
-**Use case:** Image/video processing, large file handling, WebAssembly memory.
+```js
+const image = new Uint8Array(pixels)
+const mask = new Uint8Array(maskData)
+const options = { width: 800, quality: 90 }
+
+await beeThreads
+  .run((img, msk, opts) => processImage(img, msk, opts))
+  .usingParams(image, mask, options)
+  .transfer([image.buffer, mask.buffer])
+  .execute()
+```
 
 ---
 
