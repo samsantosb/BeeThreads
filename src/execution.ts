@@ -36,7 +36,7 @@
 
 import { config, metrics } from './config';
 import { requestWorker, releaseWorker, fastHash } from './pool';
-import { sleep, calculateBackoff } from './utils';
+import { sleep, calculateBackoff, reconstructBuffers } from './utils';
 import { AbortError, TimeoutError, WorkerError } from './errors';
 import { MessageType } from './types';
 import { coalesce } from './coalescing';
@@ -185,7 +185,8 @@ export async function executeOnce<T = unknown>(
       // New format: type-based discriminated union
       if ('type' in msg) {
         if (msg.type === MessageType.SUCCESS) {
-          settle(true, (msg as WorkerSuccessResponse).value);
+          const value = reconstructBuffers((msg as WorkerSuccessResponse).value);
+          settle(true, value);
         } else if (msg.type === MessageType.ERROR) {
           const errMsg = msg as WorkerErrorResponse;
           const err = reconstructError(errMsg.error as unknown as Record<string, unknown>);
@@ -201,7 +202,8 @@ export async function executeOnce<T = unknown>(
       // Legacy format: ok-based (backwards compatibility)
       if ('ok' in msg) {
         if (msg.ok) {
-          settle(true, msg.value);
+          const value = reconstructBuffers(msg.value);
+          settle(true, value);
         } else {
           const err = reconstructError(msg.error as unknown as Record<string, unknown>);
           settle(false, err);

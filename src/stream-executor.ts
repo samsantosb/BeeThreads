@@ -47,6 +47,7 @@ import { Worker } from 'worker_threads';
 import { config } from './config';
 import { requestWorker, releaseWorker } from './pool';
 import { validateFunction } from './validation';
+import { reconstructBuffers } from './utils';
 import { WorkerError } from './errors';
 import { MessageType } from './types';
 import type { GeneratorMessage, WorkerEntry, WorkerLogMessage } from './types';
@@ -191,10 +192,10 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
 
               switch (msg.type) {
                 case MessageType.YIELD:
-                  controller.enqueue(msg.value as T);
+                  controller.enqueue(reconstructBuffers(msg.value) as T);
                   break;
                 case MessageType.RETURN:
-                  returnValue = msg.value as T;
+                  returnValue = reconstructBuffers(msg.value) as T;
                   break;
                 case MessageType.END:
                   controller.close();
