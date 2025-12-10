@@ -86,3 +86,57 @@ export function calculateBackoff(
   return Math.round(delay + jitter);
 }
 
+/**
+ * Reconstructs Buffer from Uint8Array after postMessage serialization.
+ * 
+ * The Structured Clone Algorithm used by postMessage converts Buffer to Uint8Array.
+ * This function recursively converts them back to Buffer for compatibility with
+ * libraries like Sharp that expect Buffer returns.
+ * 
+ * @param value - Value to process (may contain Uint8Arrays)
+ * @returns Value with Uint8Arrays converted to Buffers
+ * 
+ * @example
+ * const result = reconstructBuffers(workerResponse.value);
+ * // Uint8Arrays are now Buffers
+ */
+export function reconstructBuffers(value: unknown): unknown {
+  // Handle null/undefined
+  if (value == null) return value;
+  
+  // Handle Uint8Array -> Buffer conversion
+  if (value instanceof Uint8Array && !(value instanceof Buffer)) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  
+  // Handle arrays recursively
+  if (Array.isArray(value)) {
+    let modified = false;
+    const result = new Array(value.length);
+    for (let i = 0; i < value.length; i++) {
+      const original = value[i];
+      const converted = reconstructBuffers(original);
+      result[i] = converted;
+      if (converted !== original) modified = true;
+    }
+    return modified ? result : value;
+  }
+  
+  // Handle plain objects recursively (but not special types like Date, etc.)
+  if (typeof value === 'object' && value.constructor === Object) {
+    let modified = false;
+    const result: Record<string, unknown> = {};
+    const keys = Object.keys(value as Record<string, unknown>);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const original = (value as Record<string, unknown>)[key];
+      const converted = reconstructBuffers(original);
+      result[key] = converted;
+      if (converted !== original) modified = true;
+    }
+    return modified ? result : value;
+  }
+  
+  return value;
+}
+
