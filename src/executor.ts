@@ -63,6 +63,8 @@ export interface Executor<T = unknown> {
   retry(retryOptions?: RetryOptions): Executor<T>;
   priority(level: Priority): Executor<T>;
   noCoalesce(): Executor<T>;
+  /** Enable automatic Uint8Array to Buffer reconstruction for worker results */
+  reconstructBuffers(): Executor<T>;
   execute(): Promise<T>;
 }
 
@@ -197,6 +199,29 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       return createExecutor<T>({
         fnString,
         options: { ...options, skipCoalescing: true },
+        args
+      });
+    },
+
+    /**
+     * Enables automatic Uint8Array to Buffer reconstruction.
+     * Use when your function returns Buffer (e.g., Sharp, fs, crypto).
+     * 
+     * The Structured Clone Algorithm used by postMessage converts Buffer to Uint8Array.
+     * This option recursively converts them back to Buffer.
+     * 
+     * @example
+     * const buffer = await beeThreads
+     *   .run((img) => require('sharp')(img).resize(100).toBuffer())
+     *   .usingParams(imageBuffer)
+     *   .reconstructBuffers()
+     *   .execute();
+     * console.log(Buffer.isBuffer(buffer)); // true
+     */
+    reconstructBuffers(): Executor<T> {
+      return createExecutor<T>({
+        fnString,
+        options: { ...options, reconstructBuffers: true },
         args
       });
     },

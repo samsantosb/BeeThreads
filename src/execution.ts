@@ -185,7 +185,8 @@ export async function executeOnce<T = unknown>(
       // New format: type-based discriminated union
       if ('type' in msg) {
         if (msg.type === MessageType.SUCCESS) {
-          const value = reconstructBuffers((msg as WorkerSuccessResponse).value);
+          const rawValue = (msg as WorkerSuccessResponse).value;
+          const value = options.reconstructBuffers ? reconstructBuffers(rawValue) : rawValue;
           settle(true, value);
         } else if (msg.type === MessageType.ERROR) {
           const errMsg = msg as WorkerErrorResponse;
@@ -202,7 +203,8 @@ export async function executeOnce<T = unknown>(
       // Legacy format: ok-based (backwards compatibility)
       if ('ok' in msg) {
         if (msg.ok) {
-          const value = reconstructBuffers(msg.value);
+          const rawValue = msg.value;
+          const value = options.reconstructBuffers ? reconstructBuffers(rawValue) : rawValue;
           settle(true, value);
         } else {
           const err = reconstructError(msg.error as unknown as Record<string, unknown>);

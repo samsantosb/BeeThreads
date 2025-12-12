@@ -17,8 +17,8 @@
 7. [Data Flow](#data-flow)
 8. [Error Handling](#error-handling)
 9. [Memory Management](#memory-management)
-10. [Runtime & Bundler Compatibility](#runtime--bundler-compatibility)
-11. [Contributing Guide](#contributing-guide)
+10.   [Runtime & Bundler Compatibility](#runtime--bundler-compatibility)
+11.   [Contributing Guide](#contributing-guide)
 
 ---
 
@@ -308,16 +308,17 @@ Implements the immutable builder pattern for task execution.
 
 **Chainable methods:**
 
-| Method                     | Description                                |
-| -------------------------- | ------------------------------------------ |
-| `.usingParams(...args)`    | Pass arguments to the function             |
-| `.setContext(obj)`         | Inject external variables (closures)       |
-| `.signal(AbortSignal)`     | Enable cancellation                        |
-| `.retry(options)`          | Auto-retry on failure                      |
-| `.priority(level)`         | Set queue priority                         |
-| `.transfer([ArrayBuffer])` | Zero-copy for large binary data            |
-| `.noCoalesce()`            | Skip request coalescing for this execution |
-| `.execute()`               | Run the function                           |
+| Method                     | Description                                  |
+| -------------------------- | -------------------------------------------- |
+| `.usingParams(...args)`    | Pass arguments to the function               |
+| `.setContext(obj)`         | Inject external variables (closures)         |
+| `.signal(AbortSignal)`     | Enable cancellation                          |
+| `.retry(options)`          | Auto-retry on failure                        |
+| `.priority(level)`         | Set queue priority                           |
+| `.transfer([ArrayBuffer])` | Zero-copy for large binary data              |
+| `.noCoalesce()`            | Skip request coalescing for this execution   |
+| `.reconstructBuffers()`    | Convert Uint8Array back to Buffer in results |
+| `.execute()`               | Run the function                             |
 
 **Example:**
 
@@ -362,6 +363,16 @@ Enables streaming results from generator functions.
 -  Captures return value for access after completion
 -  Handles cleanup on cancel
 
+**Chainable methods:**
+
+| Method                  | Description                                  |
+| ----------------------- | -------------------------------------------- |
+| `.usingParams(...args)` | Pass arguments to the generator              |
+| `.setContext(obj)`      | Inject external variables (closures)         |
+| `.transfer([...]))`     | Zero-copy for large binary data              |
+| `.reconstructBuffers()` | Convert Uint8Array back to Buffer in results |
+| `.execute()`            | Start streaming                              |
+
 **Example:**
 
 ```js
@@ -380,6 +391,22 @@ for await (const value of stream) {
 }
 
 console.log(stream.returnValue) // 'done'
+```
+
+**With Buffer reconstruction:**
+
+```js
+const stream = beeThreads
+	.stream(function* () {
+		yield require('fs').readFileSync('chunk1.bin')
+		yield require('fs').readFileSync('chunk2.bin')
+	})
+	.reconstructBuffers()
+	.execute()
+
+for await (const chunk of stream) {
+	console.log(Buffer.isBuffer(chunk)) // true ✅
+}
 ```
 
 ---
@@ -562,32 +589,32 @@ executeTurboReduce(fn, data, initial, options) // Parallel tree reduction
 
 **TurboExecutor methods:**
 
-| Method            | Description                            |
-| ----------------- | -------------------------------------- |
-| `.map(data)`      | Transform each item in parallel        |
-| `.mapWithStats()` | Map with execution statistics          |
-| `.filter(data)`   | Filter items in parallel               |
+| Method                | Description                          |
+| --------------------- | ------------------------------------ |
+| `.map(data)`          | Transform each item in parallel      |
+| `.mapWithStats()`     | Map with execution statistics        |
+| `.filter(data)`       | Filter items in parallel             |
 | `.reduce(data, init)` | Reduce using parallel tree reduction |
 
 **Example:**
 
 ```js
 // Map - transform each item
-const squares = await beeThreads.turbo((x) => x * x).map(numbers);
+const squares = await beeThreads.turbo(x => x * x).map(numbers)
 
 // With TypedArray (SharedArrayBuffer - zero-copy)
-const data = new Float64Array(1_000_000);
-const result = await beeThreads.turbo((x) => Math.sqrt(x)).map(data);
+const data = new Float64Array(1_000_000)
+const result = await beeThreads.turbo(x => Math.sqrt(x)).map(data)
 
 // Filter
-const evens = await beeThreads.turbo((x) => x % 2 === 0).filter(numbers);
+const evens = await beeThreads.turbo(x => x % 2 === 0).filter(numbers)
 
 // Reduce
-const sum = await beeThreads.turbo((a, b) => a + b).reduce(numbers, 0);
+const sum = await beeThreads.turbo((a, b) => a + b).reduce(numbers, 0)
 
 // With stats
-const { data, stats } = await beeThreads.turbo((x) => heavyMath(x)).mapWithStats(arr);
-console.log(stats.speedupRatio); // "7.2x"
+const { data, stats } = await beeThreads.turbo(x => heavyMath(x)).mapWithStats(arr)
+console.log(stats.speedupRatio) // "7.2x"
 ```
 
 ---
@@ -783,6 +810,24 @@ await sleep(1000)
 
 // Exponential backoff with jitter
 calculateBackoff(attempt, baseDelay, maxDelay, factor)
+
+// Reconstruct Buffer from Uint8Array after postMessage serialization
+reconstructBuffers(value)
+```
+
+**Why reconstructBuffers()?**
+
+The Structured Clone Algorithm used by `postMessage` converts `Buffer` to `Uint8Array`.
+This function recursively converts them back to `Buffer` for compatibility with
+libraries like Sharp that expect `Buffer` returns.
+
+```typescript
+function reconstructBuffers(value: unknown): unknown {
+	if (value instanceof Uint8Array && !(value instanceof Buffer)) {
+		return Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+	}
+	// Recursively handle arrays and plain objects...
+}
 ```
 
 ---
@@ -891,7 +936,7 @@ calculateBackoff(attempt, baseDelay, maxDelay, factor)
 **Performance characteristics:**
 
 | Array Size | Single Worker | Turbo (8 cores) | Speedup |
-|------------|---------------|-----------------|---------|
+| ---------- | ------------- | --------------- | ------- |
 | 10K items  | 45ms          | 20ms            | 2.2x    |
 | 100K items | 450ms         | 120ms           | 3.7x    |
 | 1M items   | 4.2s          | 580ms           | 7.2x    |
@@ -943,10 +988,11 @@ calculateBackoff(attempt, baseDelay, maxDelay, factor)
 **Decision:** Enable security protections by default with opt-out config.
 
 **Rationale:**
-- Security should be the default state
-- Transparent protections don't affect normal use cases
-- Users who need to disable can do so explicitly
-- Follows principle of least surprise
+
+-  Security should be the default state
+-  Transparent protections don't affect normal use cases
+-  Users who need to disable can do so explicitly
+-  Follows principle of least surprise
 
 ---
 
@@ -954,12 +1000,12 @@ calculateBackoff(attempt, baseDelay, maxDelay, factor)
 
 ### Built-in Protections
 
-| Protection | Type | Default | Configurable |
-|------------|------|---------|--------------|
-| **Function size limit** | DoS prevention | 1MB | `security.maxFunctionSize` |
-| **Prototype pollution block** | Injection prevention | Enabled | `security.blockPrototypePollution` |
-| **vm.Script sandboxing** | Isolation | Always | No |
-| **data: URL workers** | CSP-friendly | Auto-detected | No |
+| Protection                    | Type                 | Default       | Configurable                       |
+| ----------------------------- | -------------------- | ------------- | ---------------------------------- |
+| **Function size limit**       | DoS prevention       | 1MB           | `security.maxFunctionSize`         |
+| **Prototype pollution block** | Injection prevention | Enabled       | `security.blockPrototypePollution` |
+| **vm.Script sandboxing**      | Isolation            | Always        | No                                 |
+| **data: URL workers**         | CSP-friendly         | Auto-detected | No                                 |
 
 ### Function Size Limit
 
@@ -968,12 +1014,10 @@ Prevents DoS attacks via extremely large function strings:
 ```typescript
 // src/validation.ts
 export function validateFunctionSize(fnString: string, maxSize: number): void {
-  const size = Buffer.byteLength(fnString, 'utf8');
-  if (size > maxSize) {
-    throw new RangeError(
-      `Function source exceeds maximum size (${size} bytes > ${maxSize} bytes limit)`
-    );
-  }
+	const size = Buffer.byteLength(fnString, 'utf8')
+	if (size > maxSize) {
+		throw new RangeError(`Function source exceeds maximum size (${size} bytes > ${maxSize} bytes limit)`)
+	}
 }
 ```
 
@@ -984,14 +1028,12 @@ Blocks dangerous keys in context objects:
 ```typescript
 // src/validation.ts
 export function validateContextSecurity(context: Record<string, unknown>): void {
-  const keys = Object.keys(context);
-  for (const key of keys) {
-    if (key === 'constructor' || key === 'prototype') {
-      throw new TypeError(
-        `Context key "${key}" is not allowed (potential prototype pollution)`
-      );
-    }
-  }
+	const keys = Object.keys(context)
+	for (const key of keys) {
+		if (key === 'constructor' || key === 'prototype') {
+			throw new TypeError(`Context key "${key}" is not allowed (potential prototype pollution)`)
+		}
+	}
 }
 ```
 
@@ -999,11 +1041,11 @@ export function validateContextSecurity(context: Record<string, unknown>): void 
 
 ```js
 beeThreads.configure({
-  security: {
-    maxFunctionSize: 2 * 1024 * 1024,  // 2MB (default: 1MB)
-    blockPrototypePollution: false      // Disable if you know what you're doing
-  }
-});
+	security: {
+		maxFunctionSize: 2 * 1024 * 1024, // 2MB (default: 1MB)
+		blockPrototypePollution: false, // Disable if you know what you're doing
+	},
+})
 ```
 
 ---
@@ -1178,37 +1220,37 @@ await beeThreads
 
 bee-threads supports multiple JavaScript runtimes:
 
-| Runtime | Status | Notes |
-|---------|--------|-------|
-| **Node.js** | ✅ Full support | v16+ recommended, uses native `worker_threads` |
-| **Bun** | ✅ Full support | Uses Bun's `worker_threads` compatibility layer |
-| **Deno** | ⚠️ Experimental | Requires `--allow-read` flag, limited testing |
+| Runtime     | Status          | Notes                                           |
+| ----------- | --------------- | ----------------------------------------------- |
+| **Node.js** | ✅ Full support | v16+ recommended, uses native `worker_threads`  |
+| **Bun**     | ✅ Full support | Uses Bun's `worker_threads` compatibility layer |
+| **Deno**    | ⚠️ Experimental | Requires `--allow-read` flag, limited testing   |
 
 **Runtime detection:**
 
 ```typescript
 // src/config.ts
 export function detectRuntime(): Runtime {
-  if (typeof globalThis.Bun !== 'undefined') return 'bun';
-  if (typeof globalThis.Deno !== 'undefined') return 'deno';
-  return 'node';
+	if (typeof globalThis.Bun !== 'undefined') return 'bun'
+	if (typeof globalThis.Deno !== 'undefined') return 'deno'
+	return 'node'
 }
 
-export const RUNTIME = detectRuntime();
-export const IS_BUN = RUNTIME === 'bun';
+export const RUNTIME = detectRuntime()
+export const IS_BUN = RUNTIME === 'bun'
 ```
 
 ### Bundler Compatibility
 
 bee-threads works with **all major bundlers** without any configuration:
 
-| Bundler | Status | Notes |
-|---------|--------|-------|
-| **Webpack** | ✅ Works | No config needed |
-| **Vite** | ✅ Works | No config needed |
-| **Rspack** | ✅ Works | No config needed |
-| **esbuild** | ✅ Works | No config needed |
-| **Rollup** | ✅ Works | No config needed |
+| Bundler       | Status   | Notes            |
+| ------------- | -------- | ---------------- |
+| **Webpack**   | ✅ Works | No config needed |
+| **Vite**      | ✅ Works | No config needed |
+| **Rspack**    | ✅ Works | No config needed |
+| **esbuild**   | ✅ Works | No config needed |
+| **Rollup**    | ✅ Works | No config needed |
 | **Turbopack** | ✅ Works | No config needed |
 
 ### How Bundler Compatibility Works
@@ -1219,7 +1261,7 @@ Traditional `worker_threads` require external `.js` files:
 
 ```js
 // ❌ This breaks with bundlers - worker.js won't be included
-const worker = new Worker(path.join(__dirname, 'worker.js'));
+const worker = new Worker(path.join(__dirname, 'worker.js'))
 ```
 
 Bundlers (Webpack, Vite, etc.) don't automatically include worker files in the bundle.
@@ -1234,11 +1276,11 @@ export const INLINE_WORKER_CODE = `
 'use strict';
 const { parentPort, workerData } = require('worker_threads');
 // ... complete worker code as string ...
-`;
+`
 
 export function createWorkerDataUrl(code: string): string {
-  const base64 = Buffer.from(code, 'utf-8').toString('base64');
-  return `data:text/javascript;base64,${base64}`;
+	const base64 = Buffer.from(code, 'utf-8').toString('base64')
+	return `data:text/javascript;base64,${base64}`
 }
 ```
 
@@ -1247,28 +1289,22 @@ export function createWorkerDataUrl(code: string): string {
 ```typescript
 // src/config.ts
 function detectBundlerMode(): boolean {
-  // Check 1: Worker file doesn't exist (bundled scenario)
-  const workerPath = path.join(__dirname, 'worker.js');
-  if (!fs.existsSync(workerPath)) return true;
-  
-  // Check 2: Known bundler globals
-  if (
-    typeof __webpack_require__ !== 'undefined' ||
-    typeof __vite_ssr_import__ !== 'undefined' ||
-    typeof __rspack_require__ !== 'undefined'
-  ) return true;
-  
-  return false;
+	// Check 1: Worker file doesn't exist (bundled scenario)
+	const workerPath = path.join(__dirname, 'worker.js')
+	if (!fs.existsSync(workerPath)) return true
+
+	// Check 2: Known bundler globals
+	if (typeof __webpack_require__ !== 'undefined' || typeof __vite_ssr_import__ !== 'undefined' || typeof __rspack_require__ !== 'undefined') return true
+
+	return false
 }
 
 export function getWorkerScript(type: PoolType): string {
-  if (USE_INLINE_WORKERS) {
-    const code = type === 'generator' 
-      ? INLINE_GENERATOR_WORKER_CODE 
-      : INLINE_WORKER_CODE;
-    return createWorkerDataUrl(code);
-  }
-  return path.join(__dirname, 'worker.js');
+	if (USE_INLINE_WORKERS) {
+		const code = type === 'generator' ? INLINE_GENERATOR_WORKER_CODE : INLINE_WORKER_CODE
+		return createWorkerDataUrl(code)
+	}
+	return path.join(__dirname, 'worker.js')
 }
 ```
 
@@ -1276,10 +1312,10 @@ export function getWorkerScript(type: PoolType): string {
 
 **Why `data:` URLs instead of `eval: true`?**
 
-| Approach | Security | CSP Compatible | Performance |
-|----------|----------|----------------|-------------|
-| `eval: true` | ⚠️ Risky | ❌ Blocked by CSP | ✅ Fast |
-| `data:` URL | ✅ Safe | ✅ Works | ✅ Fast |
+| Approach     | Security | CSP Compatible    | Performance |
+| ------------ | -------- | ----------------- | ----------- |
+| `eval: true` | ⚠️ Risky | ❌ Blocked by CSP | ✅ Fast     |
+| `data:` URL  | ✅ Safe  | ✅ Works          | ✅ Fast     |
 
 The worker code is **static** (not user input), so `data:` URLs are safe and work with Content Security Policy.
 

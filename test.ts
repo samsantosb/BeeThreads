@@ -3670,6 +3670,188 @@ async function runTests(): Promise<void> {
 
   await beeThreads.shutdown();
 
+  // ---------- BUFFER RECONSTRUCTION ----------
+  section('Buffer Reconstruction (.reconstructBuffers())');
+
+  await test('reconstructBuffers() method exists on executor', async () => {
+    const executor = beeThreads.run(() => Buffer.from('test'));
+    assert.strictEqual(typeof executor.reconstructBuffers, 'function');
+  });
+
+  await test('reconstructBuffers() method exists on stream executor', async () => {
+    const executor = beeThreads.stream(function* () { yield Buffer.from('test'); });
+    assert.strictEqual(typeof executor.reconstructBuffers, 'function');
+  });
+
+  await test('without reconstructBuffers(), Buffer returns as Uint8Array', async () => {
+    const result = await beeThreads
+      .run(() => Buffer.from('hello world'))
+      .execute();
+    
+    // postMessage converts Buffer to Uint8Array
+    assert.ok(result instanceof Uint8Array, 'Result should be Uint8Array');
+    assert.ok(!Buffer.isBuffer(result), 'Result should NOT be Buffer without reconstructBuffers()');
+  });
+
+  await test('with reconstructBuffers(), Buffer returns as Buffer', async () => {
+    const result = await beeThreads
+      .run(() => Buffer.from('hello world'))
+      .reconstructBuffers()
+      .execute();
+    
+    assert.ok(Buffer.isBuffer(result), 'Result should be Buffer with reconstructBuffers()');
+    assert.strictEqual(result.toString(), 'hello world');
+  });
+
+  await test('reconstructBuffers() works with nested Buffer in object', async () => {
+    const result = await beeThreads
+      .run(() => ({
+        name: 'test',
+        data: Buffer.from('nested buffer'),
+        count: 42
+      }))
+      .reconstructBuffers()
+      .execute() as { name: string; data: Buffer; count: number };
+    
+    assert.strictEqual(result.name, 'test');
+    assert.ok(Buffer.isBuffer(result.data), 'Nested data should be Buffer');
+    assert.strictEqual(result.data.toString(), 'nested buffer');
+    assert.strictEqual(result.count, 42);
+  });
+
+  await test('reconstructBuffers() works with Buffer in array', async () => {
+    const result = await beeThreads
+      .run(() => [
+        Buffer.from('first'),
+        Buffer.from('second'),
+        Buffer.from('third')
+      ])
+      .reconstructBuffers()
+      .execute() as Buffer[];
+    
+    assert.ok(Array.isArray(result), 'Result should be array');
+    assert.strictEqual(result.length, 3);
+    assert.ok(Buffer.isBuffer(result[0]), 'First item should be Buffer');
+    assert.ok(Buffer.isBuffer(result[1]), 'Second item should be Buffer');
+    assert.ok(Buffer.isBuffer(result[2]), 'Third item should be Buffer');
+    assert.strictEqual(result[0].toString(), 'first');
+    assert.strictEqual(result[1].toString(), 'second');
+    assert.strictEqual(result[2].toString(), 'third');
+  });
+
+  await test('without reconstructBuffers(), nested Buffer is Uint8Array', async () => {
+    const result = await beeThreads
+      .run(() => ({ buffer: Buffer.from('test') }))
+      .execute() as { buffer: Uint8Array };
+    
+    assert.ok(result.buffer instanceof Uint8Array, 'Nested buffer should be Uint8Array');
+    assert.ok(!Buffer.isBuffer(result.buffer), 'Nested buffer should NOT be Buffer');
+  });
+
+  await test('reconstructBuffers() preserves non-Buffer values', async () => {
+    const result = await beeThreads
+      .run(() => ({
+        str: 'hello',
+        num: 123,
+        bool: true,
+        arr: [1, 2, 3],
+        nested: { a: 1, b: 2 }
+      }))
+      .reconstructBuffers()
+      .execute() as { str: string; num: number; bool: boolean; arr: number[]; nested: { a: number; b: number } };
+    
+    assert.strictEqual(result.str, 'hello');
+    assert.strictEqual(result.num, 123);
+    assert.strictEqual(result.bool, true);
+    assert.deepStrictEqual(result.arr, [1, 2, 3]);
+    assert.deepStrictEqual(result.nested, { a: 1, b: 2 });
+  });
+
+  await test('reconstructBuffers() can be chained with other methods', async () => {
+    const result = await beeThreads
+      .run((prefix: string) => Buffer.from(prefix + ' world'))
+      .usingParams('hello')
+      .reconstructBuffers()
+      .priority('high')
+      .execute();
+    
+    assert.ok(Buffer.isBuffer(result), 'Result should be Buffer');
+    assert.strictEqual(result.toString(), 'hello world');
+  });
+
+  await test('stream reconstructBuffers() converts yielded Buffers', async () => {
+    const stream = beeThreads
+      .stream(function* () {
+        yield Buffer.from('chunk1');
+        yield Buffer.from('chunk2');
+        yield Buffer.from('chunk3');
+      })
+      .reconstructBuffers()
+      .execute();
+    
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk as Buffer);
+    }
+    
+    assert.strictEqual(chunks.length, 3);
+    assert.ok(Buffer.isBuffer(chunks[0]), 'First chunk should be Buffer');
+    assert.ok(Buffer.isBuffer(chunks[1]), 'Second chunk should be Buffer');
+    assert.ok(Buffer.isBuffer(chunks[2]), 'Third chunk should be Buffer');
+    assert.strictEqual(chunks[0].toString(), 'chunk1');
+    assert.strictEqual(chunks[1].toString(), 'chunk2');
+    assert.strictEqual(chunks[2].toString(), 'chunk3');
+  });
+
+  await test('stream without reconstructBuffers() yields Uint8Array', async () => {
+    const stream = beeThreads
+      .stream(function* () {
+        yield Buffer.from('chunk');
+      })
+      .execute();
+    
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk as Uint8Array);
+    }
+    
+    assert.strictEqual(chunks.length, 1);
+    assert.ok(chunks[0] instanceof Uint8Array, 'Chunk should be Uint8Array');
+    assert.ok(!Buffer.isBuffer(chunks[0]), 'Chunk should NOT be Buffer');
+  });
+
+  await test('bee() with reconstructBuffers in beeClosures option', async () => {
+    // bee() API doesn't have fluent .reconstructBuffers() 
+    // but the underlying run() does - test that run works
+    const result = await beeThreads
+      .run(() => Buffer.from('bee test'))
+      .reconstructBuffers()
+      .execute();
+    
+    assert.ok(Buffer.isBuffer(result), 'Result should be Buffer');
+    assert.strictEqual(result.toString(), 'bee test');
+  });
+
+  await test('large Buffer reconstruction works correctly', async () => {
+    const size = 1024 * 1024; // 1MB
+    const result = await beeThreads
+      .run((s: number) => {
+        const buf = Buffer.alloc(s);
+        buf.fill(0x42); // Fill with 'B'
+        return buf;
+      })
+      .usingParams(size)
+      .reconstructBuffers()
+      .execute();
+    
+    assert.ok(Buffer.isBuffer(result), 'Result should be Buffer');
+    assert.strictEqual(result.length, size);
+    assert.strictEqual(result[0], 0x42);
+    assert.strictEqual(result[size - 1], 0x42);
+  });
+
+  await beeThreads.shutdown();
+
   // ---------- INLINE WORKERS VALIDATION ----------
   section('Inline Workers (Bundler Compatibility)');
 

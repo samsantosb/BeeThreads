@@ -131,7 +131,10 @@ await beeThreads
 ### `.usingParams(...args)`
 
 ```js
-await beeThreads.run((a, b) => a + b).usingParams(10, 20).execute() // → 30
+await beeThreads
+	.run((a, b) => a + b)
+	.usingParams(10, 20)
+	.execute() // → 30
 ```
 
 ### `.setContext({ vars })`
@@ -140,7 +143,11 @@ Inject external variables (closures):
 
 ```js
 const TAX = 0.2
-await beeThreads.run(p => p * (1 + TAX)).usingParams(100).setContext({ TAX }).execute() // → 120
+await beeThreads
+	.run(p => p * (1 + TAX))
+	.usingParams(100)
+	.setContext({ TAX })
+	.execute() // → 120
 ```
 
 ### `.signal(AbortSignal)` - Cancellation
@@ -152,13 +159,13 @@ const controller = new AbortController()
 
 // Start a heavy computation
 const promise = beeThreads
-  .run(() => {
-    let sum = 0
-    for (let i = 0; i < 1e10; i++) sum += i
-    return sum
-  })
-  .signal(controller.signal)
-  .execute()
+	.run(() => {
+		let sum = 0
+		for (let i = 0; i < 1e10; i++) sum += i
+		return sum
+	})
+	.signal(controller.signal)
+	.execute()
 
 // User clicks "Cancel" button
 cancelButton.onclick = () => controller.abort()
@@ -170,14 +177,14 @@ Retry failed tasks with exponential backoff:
 
 ```js
 const data = await beeThreads
-  .run(() => fetchFromFlakyAPI())
-  .retry({
-    maxAttempts: 5,    // Try up to 5 times
-    baseDelay: 100,    // Start with 100ms delay
-    maxDelay: 5000,    // Cap at 5 seconds
-    backoffFactor: 2   // Double delay each retry: 100 → 200 → 400 → 800...
-  })
-  .execute()
+	.run(() => fetchFromFlakyAPI())
+	.retry({
+		maxAttempts: 5, // Try up to 5 times
+		baseDelay: 100, // Start with 100ms delay
+		maxDelay: 5000, // Cap at 5 seconds
+		backoffFactor: 2, // Double delay each retry: 100 → 200 → 400 → 800...
+	})
+	.execute()
 ```
 
 ### `.priority('high' | 'normal' | 'low')`
@@ -186,10 +193,16 @@ Control execution order when workers are busy:
 
 ```js
 // Payment processing - jump the queue
-await beeThreads.run(() => processPayment()).priority('high').execute()
+await beeThreads
+	.run(() => processPayment())
+	.priority('high')
+	.execute()
 
 // Report generation - can wait
-await beeThreads.run(() => generateReport()).priority('low').execute()
+await beeThreads
+	.run(() => generateReport())
+	.priority('low')
+	.execute()
 ```
 
 ### `.transfer([...buffers])` - Zero-copy Transfer
@@ -201,10 +214,10 @@ Move large binary data to worker without copying:
 const imageBuffer = new ArrayBuffer(10 * 1024 * 1024)
 
 await beeThreads
-  .run(buf => processImage(buf))
-  .usingParams(imageBuffer)
-  .transfer([imageBuffer])
-  .execute()
+	.run(buf => processImage(buf))
+	.usingParams(imageBuffer)
+	.transfer([imageBuffer.buffer])
+	.execute()
 
 // Note: imageBuffer is now empty (ownership moved to worker)
 ```
@@ -215,11 +228,57 @@ const mask = new Uint8Array(maskData)
 const options = { width: 800, quality: 90 }
 
 await beeThreads
-  .run((img, msk, opts) => processImage(img, msk, opts, SHARP_OPTIONS))
-  .usingParams(image, mask, options)
-  .setContext({ SHARP_OPTIONS: { fit: 'cover' } })
-  .transfer([image.buffer, mask.buffer])
-  .execute()
+	.run((img, msk, opts) => processImage(img, msk, opts, SHARP_OPTIONS))
+	.usingParams(image, mask, options)
+	.setContext({ SHARP_OPTIONS: { fit: 'cover' } })
+	.transfer([image.buffer, mask.buffer])
+	.execute()
+```
+
+### `.reconstructBuffers()` - Buffer Reconstruction
+
+When using libraries like **Sharp**, **fs**, or **crypto** that return `Buffer`, the result gets converted to `Uint8Array` by `postMessage`. Use `.reconstructBuffers()` to convert them back:
+
+```js
+// Without reconstructBuffers() - returns Uint8Array
+const uint8 = await beeThreads.run(() => require('fs').readFileSync('file.txt')).execute()
+console.log(Buffer.isBuffer(uint8)) // false (Uint8Array)
+
+// With reconstructBuffers() - returns Buffer
+const buffer = await beeThreads
+	.run(() => require('fs').readFileSync('file.txt'))
+	.reconstructBuffers()
+	.execute()
+console.log(Buffer.isBuffer(buffer)) // true ✅
+```
+
+Works with **Sharp** for image processing:
+
+```js
+const resized = await beeThreads
+	.run(img => require('sharp')(img).resize(100, 100).toBuffer())
+	.usingParams(imageBuffer)
+	.transfer([imageBuffer.buffer])
+	.reconstructBuffers()
+	.execute()
+
+console.log(Buffer.isBuffer(resized)) // true ✅
+```
+
+Also works with **generators**:
+
+```js
+const stream = beeThreads
+	.stream(function* () {
+		yield require('fs').readFileSync('chunk1.bin')
+		yield require('fs').readFileSync('chunk2.bin')
+	})
+	.reconstructBuffers()
+	.execute()
+
+for await (const chunk of stream) {
+	console.log(Buffer.isBuffer(chunk)) // true ✅
+}
 ```
 
 ---
@@ -289,18 +348,17 @@ Prevents duplicate simultaneous calls from running multiple times. When the same
 
 ```js
 // All 3 calls share ONE execution, return same result
-const [r1, r2, r3] = await Promise.all([
-	bee(x => expensiveComputation(x))(42),
-	bee(x => expensiveComputation(x))(42),
-	bee(x => expensiveComputation(x))(42),
-])
+const [r1, r2, r3] = await Promise.all([bee(x => expensiveComputation(x))(42), bee(x => expensiveComputation(x))(42), bee(x => expensiveComputation(x))(42)])
 
 // Control coalescing
 beeThreads.setCoalescing(false) // disable globally
 beeThreads.getCoalescingStats() // { coalesced: 15, unique: 100, coalescingRate: '13%' }
 
 // Opt-out for specific execution
-await beeThreads.run(() => Date.now()).noCoalesce().execute()
+await beeThreads
+	.run(() => Date.now())
+	.noCoalesce()
+	.execute()
 ```
 
 **Auto-detection:** Functions with `Date.now()`, `Math.random()`, `crypto.randomUUID()` are automatically excluded.
@@ -406,9 +464,9 @@ const stream = beeThreads
 
 ## Limitations
 
-- **No `this` binding** - Use arrow functions or `.setContext()`
-- **No closures** - External vars via `beeClosures` or `.setContext()`
-- **Serializable only** - No functions, Symbols, or circular refs in args/return
+-  **No `this` binding** - Use arrow functions or `.setContext()`
+-  **No closures** - External vars via `beeClosures` or `.setContext()`
+-  **Serializable only** - No functions, Symbols, or circular refs in args/return
 
 ---
 

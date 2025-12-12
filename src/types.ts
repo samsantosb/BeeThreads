@@ -198,6 +198,8 @@ export interface ExecutionOptions {
   priority?: Priority;
   /** Skip request coalescing for this execution (for non-deterministic functions) */
   skipCoalescing?: boolean;
+  /** Enable automatic Uint8Array to Buffer reconstruction for worker results */
+  reconstructBuffers?: boolean;
 }
 
 /** Retry options for executor */

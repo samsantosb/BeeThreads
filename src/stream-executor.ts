@@ -61,6 +61,7 @@ interface StreamExecutorState {
   context: Record<string, unknown> | null;
   args: unknown[];
   transfer: ArrayBufferLike[];
+  shouldReconstructBuffers: boolean;
 }
 
 /** Stream result type - ReadableStream that is also async iterable */
@@ -70,6 +71,8 @@ export interface StreamExecutor<T = unknown> {
   usingParams(...params: unknown[]): StreamExecutor<T>;
   setContext(ctx: Record<string, unknown>): StreamExecutor<T>;
   transfer(list: ArrayBufferLike[]): StreamExecutor<T>;
+  /** Enable automatic Uint8Array to Buffer reconstruction for yielded/returned values */
+  reconstructBuffers(): StreamExecutor<T>;
   execute(): StreamResult<T>;
 }
 
@@ -81,7 +84,7 @@ export interface StreamExecutor<T = unknown> {
  * Creates a stream executor for generators.
  */
 export function createStreamExecutor<T = unknown>(state: StreamExecutorState): StreamExecutor<T> {
-  const { fnString, context, args, transfer } = state;
+  const { fnString, context, args, transfer, shouldReconstructBuffers } = state;
 
   const executor: StreamExecutor<T> = {
     /**
@@ -92,7 +95,8 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
         fnString,
         context,
         args: args.length > 0 ? args.concat(params) : params,
-        transfer
+        transfer,
+        shouldReconstructBuffers
       });
     },
 
@@ -124,7 +128,8 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
         fnString,
         context: ctx,
         args,
-        transfer
+        transfer,
+        shouldReconstructBuffers
       });
     },
 
@@ -136,7 +141,31 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
         fnString,
         context,
         args,
-        transfer: list
+        transfer: list,
+        shouldReconstructBuffers
+      });
+    },
+
+    /**
+     * Enables automatic Uint8Array to Buffer reconstruction.
+     * Use when your generator yields or returns Buffer values.
+     * 
+     * @example
+     * const stream = beeThreads
+     *   .stream(function* () {
+     *     yield require('fs').readFileSync('file1.txt');
+     *     yield require('fs').readFileSync('file2.txt');
+     *   })
+     *   .reconstructBuffers()
+     *   .execute();
+     */
+    reconstructBuffers(): StreamExecutor<T> {
+      return createStreamExecutor<T>({
+        fnString,
+        context,
+        args,
+        transfer,
+        shouldReconstructBuffers: true
       });
     },
 
@@ -191,12 +220,17 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
               }
 
               switch (msg.type) {
-                case MessageType.YIELD:
-                  controller.enqueue(reconstructBuffers(msg.value) as T);
+                case MessageType.YIELD: {
+                  const rawValue = msg.value;
+                  const value = shouldReconstructBuffers ? reconstructBuffers(rawValue) : rawValue;
+                  controller.enqueue(value as T);
                   break;
-                case MessageType.RETURN:
-                  returnValue = reconstructBuffers(msg.value) as T;
+                }
+                case MessageType.RETURN: {
+                  const rawValue = msg.value;
+                  returnValue = (shouldReconstructBuffers ? reconstructBuffers(rawValue) : rawValue) as T;
                   break;
+                }
                 case MessageType.END:
                   controller.close();
                   cleanup();
@@ -314,7 +348,8 @@ export function stream<T extends GeneratorFunction>(genFn: T): StreamExecutor<Yi
     fnString: genFn.toString(),
     context: null,
     args: [],
-    transfer: []
+    transfer: [],
+    shouldReconstructBuffers: false
   });
 }
 
