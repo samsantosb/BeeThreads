@@ -178,131 +178,28 @@ const hash = await beeThreads.worker<typeof hashPassword>('./workers/hash-passwo
 
 ## `worker().turbo()` - File Workers + Parallel Arrays
 
-**The killer feature for data-intensive applications.**
-
-When you have thousands (or millions) of records that need to be enriched with data from databases, APIs, or external services — `worker().turbo()` distributes the workload across multiple workers, each with its own connection pool.
-
-### Real-World Example: E-commerce Order Enrichment
+Process large arrays with **database access** across multiple workers. Each worker has its own connection pool.
 
 ```ts
-// workers/enrich-orders.ts
-import { prisma } from '../lib/prisma'
-import { redis } from '../lib/redis'
-import { stripe } from '../lib/stripe'
+// workers/process-users.ts
+import { db } from '../database'
+import { calculateScore } from '../scoring'
 
-interface Order {
-	id: string
-	userId: string
-	productIds: string[]
-	paymentIntentId: string
-}
-
-interface EnrichedOrder extends Order {
-	user: { name: string; email: string; tier: string }
-	products: { id: string; name: string; price: number; stock: number }[]
-	payment: { status: string; amount: number; currency: string }
-	cached: boolean
-}
-
-export default async function (orders: Order[]): Promise<EnrichedOrder[]> {
+export default async function (users: User[]): Promise<ProcessedUser[]> {
 	return Promise.all(
-		orders.map(async order => {
-			// Check Redis cache first
-			const cached = await redis.get(`order:${order.id}:enriched`)
-			if (cached) return { ...JSON.parse(cached), cached: true }
-
-			// Parallel fetches for each order
-			const [user, products, payment] = await Promise.all([
-				prisma.user.findUnique({
-					where: { id: order.userId },
-					select: { name: true, email: true, tier: true },
-				}),
-				prisma.product.findMany({
-					where: { id: { in: order.productIds } },
-					select: { id: true, name: true, price: true, stock: true },
-				}),
-				stripe.paymentIntents.retrieve(order.paymentIntentId),
-			])
-
-			const enriched: EnrichedOrder = {
-				...order,
-				user: user!,
-				products,
-				payment: {
-					status: payment.status,
-					amount: payment.amount,
-					currency: payment.currency,
-				},
-				cached: false,
-			}
-
-			// Cache for 5 minutes
-			await redis.setex(`order:${order.id}:enriched`, 300, JSON.stringify(enriched))
-
-			return enriched
-		})
+		users.map(async user => ({
+			...user,
+			score: await calculateScore(user),
+			data: await db.fetch(user.id),
+		}))
 	)
 }
-```
 
-```ts
-// main.ts - Enrich 50,000 orders across 8 workers
-import { beeThreads } from 'bee-threads'
-
-const orders = await prisma.order.findMany({
-	where: { status: 'pending_enrichment' },
-	take: 50_000,
-})
-
-// Each worker has its own Prisma, Redis, and Stripe connections
-// 50,000 orders ÷ 8 workers = ~6,250 orders per worker (in parallel!)
-const enrichedOrders = await beeThreads.worker('./workers/enrich-orders').turbo(orders, { workers: 8 })
-
-console.log(`Enriched ${enrichedOrders.length} orders`)
-// → Enriched 50000 orders (in ~15 seconds instead of ~2 minutes)
-```
-
-### How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    50,000 orders to enrich                              │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                         ┌──────────┴──────────┐
-                         │   SPLIT (8 chunks)  │
-                         └──────────┬──────────┘
-                                    │
-    ┌───────────┬───────────┬───────┴───────┬───────────┬───────────┐
-    ▼           ▼           ▼               ▼           ▼           ▼
-┌───────┐   ┌───────┐   ┌───────┐       ┌───────┐   ┌───────┐   ┌───────┐
-│Worker1│   │Worker2│   │Worker3│  ...  │Worker6│   │Worker7│   │Worker8│
-│ 6,250 │   │ 6,250 │   │ 6,250 │       │ 6,250 │   │ 6,250 │   │ 6,250 │
-│orders │   │orders │   │orders │       │orders │   │orders │   │orders │
-├───────┤   ├───────┤   ├───────┤       ├───────┤   ├───────┤   ├───────┤
-│Prisma │   │Prisma │   │Prisma │       │Prisma │   │Prisma │   │Prisma │
-│Redis  │   │Redis  │   │Redis  │       │Redis  │   │Redis  │   │Redis  │
-│Stripe │   │Stripe │   │Stripe │       │Stripe │   │Stripe │   │Stripe │
-└───────┘   └───────┘   └───────┘       └───────┘   └───────┘   └───────┘
-    │           │           │               │           │           │
-    └───────────┴───────────┴───────┬───────┴───────────┴───────────┘
-                                    ▼
-                         ┌──────────────────────┐
-                         │  MERGE (order kept)  │
-                         │   50,000 enriched    │
-                         └──────────────────────┘
+// main.ts - 10,000 users across 8 workers
+const results = await beeThreads.worker('./workers/process-users').turbo(users, { workers: 8 })
 ```
 
 > **Default workers:** `os.cpus().length - 1` (if not specified)
-
-### Use Cases
-
-| Scenario                        | Without worker().turbo()      | With worker().turbo()          |
-| ------------------------------- | ----------------------------- | ------------------------------ |
-| 50K orders enrichment           | ~2 min (sequential)           | **~15 sec** (8 workers)        |
-| 100K users + ML scoring         | ~5 min                        | **~40 sec**                    |
-| 1M records ETL pipeline         | ~30 min                       | **~4 min**                     |
-| Batch payment processing        | I/O bound, single connection  | **Parallel connections**       |
 
 ### When to Use
 
