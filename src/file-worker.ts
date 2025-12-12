@@ -57,6 +57,16 @@
 import { Worker } from 'worker_threads';
 import * as path from 'path';
 import * as os from 'os';
+import { 
+  autoPack, 
+  canAutoPack, 
+  makeTransferable, 
+  getTransferablesFromPacked,
+  AUTOPACK_ARRAY_THRESHOLD,
+  GENERIC_UNPACK_CODE,
+  GENERIC_PACK_CODE,
+  type TransferablePackedData
+} from './autopack';
 
 // ============================================================================
 // TYPES
@@ -99,6 +109,11 @@ export interface TurboWorkerOptions {
    * - Higher values increase parallelism but also memory usage
    * - Each worker maintains its own module cache and DB connections
    * - Recommended: Start with default, increase if CPU-bound
+   * 
+   * **Performance Note:**
+   * For maximum performance with arrays, consider using `beeThreads.turbo()`
+   * which uses SharedArrayBuffer for TypedArrays. File workers are best
+   * suited for tasks that need `require()`, database access, or external modules.
    */
   workers?: number;
 }
@@ -225,14 +240,29 @@ function createWorker(absPath: string): Worker {
     const fn = require('${escapedPath}');
     const handler = fn.default || fn;
     
+    // AutoPack support for large arrays
+    ${GENERIC_UNPACK_CODE}
+    ${GENERIC_PACK_CODE}
+    
     parentPort.on('message', async (msg) => {
       const id = msg.id;
       const args = msg.args;
       const isTurboChunk = msg.isTurboChunk;
+      const isPacked = msg.isPacked;
+      
       try {
         let result;
         if (isTurboChunk) {
-          result = await handler(args[0]);
+          // Unpack if data was sent packed
+          const chunk = isPacked ? genericUnpack(args[0]) : args[0];
+          result = await handler(chunk);
+          
+          // Pack result back if input was packed and result is array
+          if (isPacked && Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
+            const packed = genericPack(result);
+            parentPort.postMessage({ id: id, success: true, result: packed, isPacked: true });
+            return;
+          }
         } else {
           result = await handler(...args);
         }
@@ -345,6 +375,53 @@ function releaseWorker(entry: FileWorkerEntry): void {
 let messageId = 0;
 
 /**
+ * Generic unpack for results from worker (main thread side).
+ * This is a simplified version that works with TransferablePackedData.
+ * @internal
+ */
+function genericUnpackResult<T>(packed: TransferablePackedData): T[] {
+  const { schema, length, numbers, strings, stringOffsets, stringLengths, booleans } = packed;
+  const { numericFields, stringFields, booleanFields } = schema;
+  
+  if (length === 0) return [];
+  
+  const result: T[] = new Array(length);
+  const decoder = new TextDecoder();
+  const numCount = numericFields.length;
+  const strCount = stringFields.length;
+  const boolCount = booleanFields.length;
+  
+  for (let i = 0; i < length; i++) {
+    const obj: Record<string, unknown> = {};
+    
+    // Numbers (column-oriented)
+    for (let f = 0; f < numCount; f++) {
+      obj[numericFields[f].name] = numbers[f * length + i];
+    }
+    
+    // Strings
+    for (let f = 0; f < strCount; f++) {
+      const idx = f * length + i;
+      const offset = stringOffsets[idx];
+      const len = stringLengths[idx];
+      obj[stringFields[f].name] = decoder.decode(strings.subarray(offset, offset + len));
+    }
+    
+    // Booleans (bit-packed)
+    for (let f = 0; f < boolCount; f++) {
+      const bitIndex = f * length + i;
+      const byteIndex = Math.floor(bitIndex / 8);
+      const bitOffset = bitIndex % 8;
+      obj[booleanFields[f].name] = (booleans[byteIndex] & (1 << bitOffset)) !== 0;
+    }
+    
+    result[i] = obj as T;
+  }
+  
+  return result;
+}
+
+/**
  * Worker message response interface.
  * V8: Stable shape for type checking.
  */
@@ -360,6 +437,13 @@ interface WorkerResponse {
 }
 
 /**
+ * Worker response with optional packed flag
+ */
+interface WorkerResponseWithPack extends WorkerResponse {
+  isPacked?: boolean;
+}
+
+/**
  * Executes a single call on a worker and returns the result.
  * Handles message correlation and error propagation.
  * @internal
@@ -367,13 +451,15 @@ interface WorkerResponse {
 function executeOnWorker<T>(
   entry: FileWorkerEntry,
   args: unknown[],
-  isTurboChunk: boolean = false
-): Promise<T> {
+  isTurboChunk: boolean = false,
+  isPacked: boolean = false,
+  transferables?: ArrayBuffer[]
+): Promise<{ result: T; isPacked: boolean }> {
   return new Promise((resolve, reject) => {
     const id = ++messageId;
     const worker = entry.worker;
 
-    const handler = (msg: WorkerResponse): void => {
+    const handler = (msg: WorkerResponseWithPack): void => {
       // Only process messages for this request
       if (msg.id !== id) return;
 
@@ -381,7 +467,7 @@ function executeOnWorker<T>(
       releaseWorker(entry);
 
       if (msg.success) {
-        resolve(msg.result as T);
+        resolve({ result: msg.result as T, isPacked: msg.isPacked || false });
       } else {
         const msgError = msg.error;
         const error = new Error(msgError?.message || 'Worker error');
@@ -392,8 +478,15 @@ function executeOnWorker<T>(
     };
 
     worker.on('message', handler);
+    
     // V8: Monomorphic message shape
-    worker.postMessage({ id: id, args: args, isTurboChunk: isTurboChunk });
+    const message = { id: id, args: args, isTurboChunk: isTurboChunk, isPacked: isPacked };
+    
+    if (transferables && transferables.length > 0) {
+      worker.postMessage(message, transferables);
+    } else {
+      worker.postMessage(message);
+    }
   });
 }
 
@@ -463,9 +556,10 @@ export function createFileWorker<T extends AnyFunction>(
   const absPath = resolvePath(filePath);
 
   // Create callable function
-  const executor = ((...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
+  const executor = (async (...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
     const entry = getWorker(absPath);
-    return executeOnWorker(entry, args, false);
+    const { result } = await executeOnWorker<Awaited<ReturnType<T>>>(entry, args, false);
+    return result;
   }) as FileWorkerExecutor<T>;
 
   // Add turbo method
@@ -475,11 +569,17 @@ export function createFileWorker<T extends AnyFunction>(
   ): Promise<TItem[]> => {
     const numWorkers = options.workers !== undefined ? options.workers : DEFAULT_MAX_WORKERS;
     const dataLength = data.length;
+    
+    // Determine if AutoPack should be used based on array size
+    // AutoPack is beneficial for large arrays of objects (100K+)
+    const useAutoPack = dataLength >= AUTOPACK_ARRAY_THRESHOLD && 
+                        canAutoPack(data as unknown[]);
 
     // Small array optimization: single worker for tiny arrays
     if (dataLength <= numWorkers) {
       const entry = getWorker(absPath);
-      return executeOnWorker(entry, [data], true);
+      const { result } = await executeOnWorker<TItem[]>(entry, [data], true, false);
+      return result;
     }
 
     // Get workers for parallel processing
@@ -487,7 +587,7 @@ export function createFileWorker<T extends AnyFunction>(
     const chunkSize = Math.ceil(dataLength / numWorkers);
 
     // V8: Pre-allocated promises array
-    const promises: Promise<TItem[]>[] = new Array(numWorkers);
+    const promises: Promise<{ result: TItem[] | TransferablePackedData; isPacked: boolean }>[] = new Array(numWorkers);
     let promiseCount = 0;
 
     // V8: Raw for loop
@@ -501,14 +601,36 @@ export function createFileWorker<T extends AnyFunction>(
       const entry = workers[i];
       entry.busy = true;
 
-      promises[promiseCount] = executeOnWorker<TItem[]>(entry, [chunk], true);
+      if (useAutoPack) {
+        // Pack chunk for faster transfer
+        const packed = autoPack(chunk as Record<string, unknown>[]);
+        const transferable = makeTransferable(packed);
+        const buffers = getTransferablesFromPacked(transferable);
+        promises[promiseCount] = executeOnWorker<TItem[] | TransferablePackedData>(
+          entry, [transferable], true, true, buffers
+        );
+      } else {
+        promises[promiseCount] = executeOnWorker<TItem[]>(entry, [chunk], true, false);
+      }
       promiseCount++;
     }
 
     // Wait for all workers (avoid slice when array is full)
-    const results = promiseCount === numWorkers 
+    const rawResults = promiseCount === numWorkers 
       ? await Promise.all(promises)
       : await Promise.all(promises.slice(0, promiseCount));
+
+    // Process results (unpack if needed)
+    const results: TItem[][] = new Array(promiseCount);
+    for (let i = 0; i < promiseCount; i++) {
+      const { result, isPacked } = rawResults[i];
+      if (isPacked && result && typeof result === 'object' && 'schema' in result) {
+        // Unpack result from worker
+        results[i] = genericUnpackResult(result as TransferablePackedData) as TItem[];
+      } else {
+        results[i] = result as TItem[];
+      }
+    }
 
     // V8: Pre-calculate total size for merged array
     let totalSize = 0;

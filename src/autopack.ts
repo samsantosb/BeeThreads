@@ -1045,6 +1045,231 @@ export function clearAutoPackCaches(): void {
 }
 
 // ============================================================================
+// TRANSFERABLE SUPPORT (for worker communication)
+// ============================================================================
+
+/**
+ * Schema without JIT functions (can be transferred via postMessage)
+ */
+export interface TransferableSchema {
+  hash: string;
+  fields: readonly FieldDescriptor[];
+  numericFields: readonly FieldDescriptor[];
+  stringFields: readonly FieldDescriptor[];
+  booleanFields: readonly FieldDescriptor[];
+  nullableFields: string[]; // Array instead of Set for transfer
+  totalNumericCount: number;
+  totalStringCount: number;
+  totalBooleanCount: number;
+  maxDepth: number;
+}
+
+/**
+ * PackedData without JIT functions (can be transferred via postMessage)
+ */
+export interface TransferablePackedData {
+  schema: TransferableSchema;
+  length: number;
+  numbers: Float64Array;
+  strings: Uint8Array;
+  stringOffsets: Uint32Array;
+  stringLengths: Uint16Array;
+  booleans: Uint8Array;
+  nullFlags: Uint8Array;
+  isShared: boolean;
+}
+
+/**
+ * Convert PackedData to transferable format (removes JIT functions).
+ * 
+ * Use this before sending PackedData to a worker via postMessage.
+ * The schema's packFn/unpackFn cannot be cloned, so we strip them.
+ * 
+ * @param packed - PackedData from autoPack()
+ * @returns Transferable version without functions
+ */
+export function makeTransferable(packed: PackedData): TransferablePackedData {
+  return {
+    schema: {
+      hash: packed.schema.hash,
+      fields: packed.schema.fields,
+      numericFields: packed.schema.numericFields,
+      stringFields: packed.schema.stringFields,
+      booleanFields: packed.schema.booleanFields,
+      nullableFields: Array.from(packed.schema.nullableFields),
+      totalNumericCount: packed.schema.totalNumericCount,
+      totalStringCount: packed.schema.totalStringCount,
+      totalBooleanCount: packed.schema.totalBooleanCount,
+      maxDepth: packed.schema.maxDepth
+    },
+    length: packed.length,
+    numbers: packed.numbers,
+    strings: packed.strings,
+    stringOffsets: packed.stringOffsets,
+    stringLengths: packed.stringLengths,
+    booleans: packed.booleans,
+    nullFlags: packed.nullFlags,
+    isShared: packed.isShared
+  };
+}
+
+/**
+ * Get ArrayBuffers from TransferablePackedData for zero-copy transfer.
+ */
+export function getTransferablesFromPacked(packed: TransferablePackedData): ArrayBuffer[] {
+  const buffers: ArrayBuffer[] = [];
+  if (packed.numbers.buffer.byteLength > 0) buffers.push(packed.numbers.buffer as ArrayBuffer);
+  if (packed.strings.buffer.byteLength > 0) buffers.push(packed.strings.buffer as ArrayBuffer);
+  if (packed.stringOffsets.buffer.byteLength > 0) buffers.push(packed.stringOffsets.buffer as ArrayBuffer);
+  if (packed.stringLengths.buffer.byteLength > 0) buffers.push(packed.stringLengths.buffer as ArrayBuffer);
+  if (packed.booleans.buffer.byteLength > 0) buffers.push(packed.booleans.buffer as ArrayBuffer);
+  if (packed.nullFlags.buffer.byteLength > 0) buffers.push(packed.nullFlags.buffer as ArrayBuffer);
+  return buffers;
+}
+
+/**
+ * Threshold for automatic AutoPack usage based on array length.
+ * Below this, structuredClone is faster. Above this, AutoPack wins.
+ */
+export const AUTOPACK_ARRAY_THRESHOLD = 100_000;
+
+/**
+ * Generic unpack function code for workers (no JIT dependency).
+ * Include this in worker code to enable AutoPack support.
+ */
+export const GENERIC_UNPACK_CODE = `
+function genericUnpack(packed) {
+  const { schema, length, numbers, strings, stringOffsets, stringLengths, booleans } = packed;
+  const { numericFields, stringFields, booleanFields } = schema;
+  
+  if (length === 0) return [];
+  
+  const result = new Array(length);
+  const decoder = new TextDecoder();
+  const numCount = numericFields.length;
+  const strCount = stringFields.length;
+  const boolCount = booleanFields.length;
+  
+  for (let i = 0; i < length; i++) {
+    const obj = {};
+    
+    // Numbers (column-oriented)
+    for (let f = 0; f < numCount; f++) {
+      obj[numericFields[f].name] = numbers[f * length + i];
+    }
+    
+    // Strings
+    for (let f = 0; f < strCount; f++) {
+      const idx = f * length + i;
+      const offset = stringOffsets[idx];
+      const len = stringLengths[idx];
+      obj[stringFields[f].name] = decoder.decode(strings.subarray(offset, offset + len));
+    }
+    
+    // Booleans (bit-packed)
+    for (let f = 0; f < boolCount; f++) {
+      const bitIndex = f * length + i;
+      const byteIndex = Math.floor(bitIndex / 8);
+      const bitOffset = bitIndex % 8;
+      obj[booleanFields[f].name] = (booleans[byteIndex] & (1 << bitOffset)) !== 0;
+    }
+    
+    result[i] = obj;
+  }
+  
+  return result;
+}
+`;
+
+/**
+ * Generic pack function code for workers (simplified, no JIT).
+ * Used to pack results back to main thread.
+ */
+export const GENERIC_PACK_CODE = `
+function genericPack(data) {
+  const len = data.length;
+  if (len === 0) return { length: 0, schema: { numericFields: [], stringFields: [], booleanFields: [] }, numbers: new Float64Array(0), strings: new Uint8Array(0), stringOffsets: new Uint32Array(0), stringLengths: new Uint16Array(0), booleans: new Uint8Array(0), nullFlags: new Uint8Array(0), isShared: false };
+  
+  const sample = data[0];
+  const keys = Object.keys(sample);
+  const numericFields = [];
+  const stringFields = [];
+  const booleanFields = [];
+  
+  for (const key of keys) {
+    const val = sample[key];
+    const type = typeof val;
+    if (type === 'number') numericFields.push({ name: key });
+    else if (type === 'string') stringFields.push({ name: key });
+    else if (type === 'boolean') booleanFields.push({ name: key });
+  }
+  
+  const numCount = numericFields.length;
+  const strCount = stringFields.length;
+  const boolCount = booleanFields.length;
+  
+  // Allocate
+  const numbers = new Float64Array(len * numCount);
+  const encoder = new TextEncoder();
+  const stringParts = [];
+  const stringOffsets = new Uint32Array(len * strCount);
+  const stringLengths = new Uint16Array(len * strCount);
+  let strOffset = 0;
+  
+  const boolBitCount = len * boolCount;
+  const booleans = new Uint8Array(Math.ceil(boolBitCount / 8));
+  
+  // Pack
+  for (let i = 0; i < len; i++) {
+    const obj = data[i];
+    
+    for (let f = 0; f < numCount; f++) {
+      numbers[f * len + i] = obj[numericFields[f].name];
+    }
+    
+    for (let f = 0; f < strCount; f++) {
+      const str = obj[stringFields[f].name] || '';
+      const encoded = encoder.encode(str);
+      stringParts.push(encoded);
+      const idx = f * len + i;
+      stringOffsets[idx] = strOffset;
+      stringLengths[idx] = encoded.length;
+      strOffset += encoded.length;
+    }
+    
+    for (let f = 0; f < boolCount; f++) {
+      if (obj[booleanFields[f].name]) {
+        const bitIndex = f * len + i;
+        const byteIndex = Math.floor(bitIndex / 8);
+        const bitOffset = bitIndex % 8;
+        booleans[byteIndex] |= (1 << bitOffset);
+      }
+    }
+  }
+  
+  // Merge strings
+  const strings = new Uint8Array(strOffset);
+  let pos = 0;
+  for (const part of stringParts) {
+    strings.set(part, pos);
+    pos += part.length;
+  }
+  
+  return {
+    schema: { numericFields, stringFields, booleanFields },
+    length: len,
+    numbers,
+    strings,
+    stringOffsets,
+    stringLengths,
+    booleans,
+    nullFlags: new Uint8Array(0),
+    isShared: false
+  };
+}
+`;
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 
