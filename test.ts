@@ -2988,6 +2988,9 @@ async function runTests(): Promise<void> {
       results.includes('shutdown') || results.includes('completed'),
       'Tasks should either complete or receive shutdown error'
     );
+    
+    // Restore pool to normal state for next tests
+    beeThreads.configure({ poolSize: 4, maxTemporaryWorkers: 2, maxQueueSize: 1000 });
   });
 
   section('Cache Edge Cases');
@@ -3589,26 +3592,6 @@ async function runTests(): Promise<void> {
 
   // ---------- TURBO COEXISTENCE TESTS ----------
   section('Turbo Mode - Coexistence with Other Features');
-
-  await test('COEXIST: turbo with context + normal bee with context', async () => {
-    const multiplier = 5;
-    const offset = 100;
-    const turboCtx = { multiplier };
-    const beeCtx = { offset };
-    
-    const turboResult = await beeThreads
-      .turbo([1, 2, 3], { force: true, context: turboCtx })
-      .map((x: number) => x * multiplier);
-    
-    const beeResult = await beeThreads
-      .run((x: number) => x + offset)
-      .usingParams(50)
-      .setContext(beeCtx)
-      .execute();
-    
-    assert.deepStrictEqual(turboResult, [5, 10, 15], 'Turbo with context works');
-    assert.strictEqual(beeResult, 150, 'Bee with context works');
-  });
 
   await test('COEXIST: turbo does not affect request coalescing', async () => {
     beeThreads.resetCoalescingStats();

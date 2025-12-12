@@ -59,6 +59,50 @@ import * as os from 'os';
 /** Any function type for generic constraints */
 type AnyFunction = (...args: any[]) => any;
 
+type NumericTypedArray =
+  | Float64Array | Float32Array
+  | Int32Array | Int16Array | Int8Array
+  | Uint32Array | Uint16Array | Uint8Array | Uint8ClampedArray;
+
+type TypedArrayCtor<T extends NumericTypedArray = NumericTypedArray> = {
+  new(buffer: ArrayBufferLike, byteOffset?: number, length?: number): T;
+  BYTES_PER_ELEMENT: number;
+  name: string;
+};
+
+const TYPED_ARRAY_CTORS: Record<string, TypedArrayCtor> = {
+  Float64Array,
+  Float32Array,
+  Int32Array,
+  Int16Array,
+  Int8Array,
+  Uint32Array,
+  Uint16Array,
+  Uint8Array,
+  Uint8ClampedArray
+};
+
+function isTypedArray(value: unknown): value is NumericTypedArray {
+  if (value === null || typeof value !== 'object') return false;
+  const keys = Object.keys(TYPED_ARRAY_CTORS);
+  for (let i = 0; i < keys.length; i++) {
+    const ctor = TYPED_ARRAY_CTORS[keys[i]];
+    if (value instanceof ctor) return true;
+  }
+  return false;
+}
+
+function getTypedArrayInfo(arr: NumericTypedArray): { ctor: TypedArrayCtor; typeName: string; bytes: number; length: number } {
+  const typeName = arr.constructor.name;
+  const ctor = TYPED_ARRAY_CTORS[typeName];
+  return {
+    ctor: ctor ?? Float64Array,
+    typeName,
+    bytes: (ctor ?? Float64Array).BYTES_PER_ELEMENT,
+    length: arr.length
+  };
+}
+
 /**
  * Internal worker pool entry tracking state.
  * @internal
@@ -174,9 +218,9 @@ export interface FileWorkerExecutor<T extends AnyFunction> {
    * ```
    */
   turbo<TItem>(
-    data: TItem[],
+    data: TItem[] | NumericTypedArray,
     options?: TurboWorkerOptions
-  ): Promise<TItem[]>;
+  ): Promise<TItem[] | NumericTypedArray>;
 }
 
 // ============================================================================
@@ -213,15 +257,49 @@ function createWorker(absPath: string): Worker {
     const { parentPort } = require('worker_threads');
     const fn = require('${absPath.replace(/\\/g, '\\\\')}');
     const handler = fn.default || fn;
+
+    const TYPED_ARRAY_CTORS = {
+      Float64Array,
+      Float32Array,
+      Int32Array,
+      Int16Array,
+      Int8Array,
+      Uint32Array,
+      Uint16Array,
+      Uint8Array,
+      Uint8ClampedArray
+    };
+
+    function reviveTypedArray(arg) {
+      if (!arg || !arg.__beeTurboSAB) return arg;
+      const Ctor = TYPED_ARRAY_CTORS[arg.type];
+      if (!Ctor) return arg;
+      return new Ctor(arg.buffer, arg.byteOffset, arg.length);
+    }
+
+    function copyToSharedOutput(result, sabMeta) {
+      if (!sabMeta || !sabMeta.output || !sabMeta.type) return false;
+      const Ctor = TYPED_ARRAY_CTORS[sabMeta.type];
+      if (!Ctor) return false;
+      const view = new Ctor(sabMeta.output.buffer, sabMeta.output.byteOffset, sabMeta.output.length);
+      const len = Math.min(view.length, Array.isArray(result) ? result.length : result?.length ?? 0);
+      for (let i = 0; i < len; i++) {
+        view[i] = result[i];
+      }
+      return true;
+    }
     
-    parentPort.on('message', async ({ id, args, isTurboChunk }) => {
+    parentPort.on('message', async ({ id, args, isTurboChunk, sabMeta }) => {
       try {
         let result;
         if (isTurboChunk) {
-          // Turbo mode: process array chunk
-          result = await handler(args[0]);
+          const revived = reviveTypedArray(args[0]);
+          result = await handler(revived);
+          if (args[0] && args[0].__beeTurboSAB && copyToSharedOutput(result, sabMeta)) {
+            parentPort.postMessage({ id, success: true, usedShared: true });
+            return;
+          }
         } else {
-          // Normal mode: call with spread args
           result = await handler(...args);
         }
         parentPort.postMessage({ id, success: true, result });
@@ -323,19 +401,20 @@ let messageId = 0;
 function executeOnWorker<T>(
   entry: FileWorkerEntry,
   args: unknown[],
-  isTurboChunk: boolean = false
+  isTurboChunk: boolean = false,
+  sabMeta?: { type?: string; output?: { buffer: SharedArrayBuffer; byteOffset: number; length: number } }
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const id = ++messageId;
 
-    const handler = (msg: { id: number; success: boolean; result?: any; error?: any }) => {
+    const handler = (msg: { id: number; success: boolean; result?: any; error?: any; usedShared?: boolean }) => {
       if (msg.id !== id) return;
 
       entry.worker.off('message', handler);
       releaseWorker(entry);
 
       if (msg.success) {
-        resolve(msg.result);
+        resolve(msg.result as T);
       } else {
         const error = new Error(msg.error?.message || 'Worker error');
         error.name = msg.error?.name || 'WorkerError';
@@ -345,7 +424,7 @@ function executeOnWorker<T>(
     };
 
     entry.worker.on('message', handler);
-    entry.worker.postMessage({ id, args, isTurboChunk });
+    entry.worker.postMessage({ id, args, isTurboChunk, sabMeta });
   });
 }
 
@@ -422,9 +501,9 @@ export function createFileWorker<T extends AnyFunction>(
 
   // Add turbo method
   executor.turbo = async <TItem>(
-    data: TItem[],
+    data: TItem[] | NumericTypedArray,
     options: TurboWorkerOptions = {}
-  ): Promise<TItem[]> => {
+  ): Promise<TItem[] | NumericTypedArray> => {
     const numWorkers = options.workers ?? DEFAULT_MAX_WORKERS;
     const dataLength = data.length;
 
@@ -432,6 +511,51 @@ export function createFileWorker<T extends AnyFunction>(
     if (dataLength <= numWorkers) {
       const entry = getWorker(absPath);
       return executeOnWorker(entry, [data], true);
+    }
+
+    // TypedArray path: use SharedArrayBuffer for zero-copy chunks
+    if (isTypedArray(data)) {
+      const { ctor, typeName, bytes, length } = getTypedArrayInfo(data);
+      const inputBuffer = new SharedArrayBuffer(length * bytes);
+      const outputBuffer = new SharedArrayBuffer(length * bytes);
+      const inputView = new ctor(inputBuffer);
+      inputView.set(data as NumericTypedArray);
+
+      const workers = getWorkersForTurbo(absPath, numWorkers);
+      const chunkSize = Math.ceil(dataLength / numWorkers);
+      const promises: Promise<void>[] = [];
+
+      for (let i = 0; i < numWorkers; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, dataLength);
+        if (start >= dataLength) break;
+
+        const entry = workers[i];
+        entry.busy = true;
+
+        const chunkDescriptor = {
+          __beeTurboSAB: true,
+          buffer: inputBuffer,
+          byteOffset: start * bytes,
+          length: end - start,
+          type: typeName
+        };
+
+        const sabMeta = {
+          type: typeName,
+          output: {
+            buffer: outputBuffer,
+            byteOffset: start * bytes,
+            length: end - start
+          }
+        };
+
+        promises.push(executeOnWorker<void>(entry, [chunkDescriptor], true, sabMeta));
+      }
+
+      await Promise.all(promises);
+      const outputView = new ctor(outputBuffer);
+      return outputView as unknown as NumericTypedArray;
     }
 
     // Get workers for parallel processing
