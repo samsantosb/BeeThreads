@@ -56,11 +56,17 @@ import type {
 
 /**
  * Executes a function once in a worker thread (no retry).
+ * 
+ * @param fn - Function to execute
+ * @param args - Arguments to pass to the function
+ * @param options - Execution options
+ * @param precomputedHash - Pre-computed function hash (optional, avoids recomputation)
  */
 export async function executeOnce<T = unknown>(
   fn: Function | { toString(): string },
   args: unknown[],
-  options: ExecutionOptions = {}
+  options: ExecutionOptions = {},
+  precomputedHash?: string
 ): Promise<T | SafeResult<T>> {
   const {
     safe = false,
@@ -75,8 +81,8 @@ export async function executeOnce<T = unknown>(
   const startTime = Date.now();
   const fnString = fn.toString();
 
-  // Compute hash for worker affinity
-  const fnHash = fastHash(fnString);
+  // Use pre-computed hash or compute now
+  const fnHash = precomputedHash ?? fastHash(fnString);
 
   // Pre-execution checks
   if (signal?.aborted) {
@@ -311,6 +317,9 @@ export async function execute<T = unknown>(
 ): Promise<T | SafeResult<T>> {
   const { retry: retryOpts = config.retry, safe = false, context = null, skipCoalescing = false } = options;
   const fnString = fn.toString();
+  
+  // Compute hash once at entry point
+  const fnHash = fastHash(fnString);
 
   // Wrap execution in coalescing to deduplicate identical concurrent requests
   // Note: Coalescing is skipped for requests with AbortSignal (each needs its own lifecycle)
@@ -319,7 +328,7 @@ export async function execute<T = unknown>(
   const executeWithRetry = async (): Promise<T | SafeResult<T>> => {
     // No retry enabled - execute once
     if (!retryOpts?.enabled) {
-      return executeOnce<T>(fn, args, options);
+      return executeOnce<T>(fn, args, options, fnHash);
     }
 
     const { maxAttempts, baseDelay, maxDelay, backoffFactor } = retryOpts;
@@ -327,7 +336,7 @@ export async function execute<T = unknown>(
 
     for (let attempt = 0, len = maxAttempts; attempt < len; attempt++) {
       try {
-        const result = await executeOnce<T>(fn, args, { ...options, safe: false });
+        const result = await executeOnce<T>(fn, args, { ...options, safe: false }, fnHash);
         return safe ? { status: 'fulfilled', value: result as T } : (result as T);
       } catch (err) {
         lastError = err as Error;
@@ -356,7 +365,8 @@ export async function execute<T = unknown>(
       args,
       context,
       executeWithRetry,
-      skipCoalescing
+      skipCoalescing,
+      fnHash
     );
   }
 

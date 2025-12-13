@@ -171,22 +171,24 @@ export function clearNonDeterministicCache(): void {
  * @param fnString - Function source code
  * @param args - Function arguments
  * @param context - Execution context (closures)
+ * @param fnHash - Pre-computed function hash (optional, avoids recomputation)
  * @returns Unique request key
  */
 function createRequestKey(
   fnString: string,
   args: unknown[],
-  context: Record<string, unknown> | null | undefined
+  context: Record<string, unknown> | null | undefined,
+  fnHash?: string
 ): string {
   // Hash the function (avoids huge keys for large functions)
-  const fnHash = fastHash(fnString);
+  const hash = fnHash ?? fastHash(fnString);
   
   // Use createContextKey for args and context (faster than JSON.stringify)
   // Note: createContextKey handles empty arrays/objects efficiently
   const argsKey = createContextKey(args);
   const contextKey = context ? createContextKey(context) : '';
   
-  return `${fnHash}:${argsKey}:${contextKey}`;
+  return `${hash}:${argsKey}:${contextKey}`;
 }
 
 // ============================================================================
@@ -209,6 +211,7 @@ function createRequestKey(
  * @param context - Execution context
  * @param factory - Factory function that creates the actual promise
  * @param skipCoalescing - Force skip coalescing for this request
+ * @param fnHash - Pre-computed function hash (optional, avoids recomputation)
  * @returns The (possibly shared) promise
  */
 export function coalesce<T>(
@@ -216,7 +219,8 @@ export function coalesce<T>(
   args: unknown[],
   context: Record<string, unknown> | null | undefined,
   factory: () => Promise<T>,
-  skipCoalescing: boolean = false
+  skipCoalescing: boolean = false,
+  fnHash?: string
 ): Promise<T> {
   // Skip coalescing if:
   // 1. Globally disabled
@@ -226,7 +230,7 @@ export function coalesce<T>(
     return factory();
   }
 
-  const key = createRequestKey(fnString, args, context);
+  const key = createRequestKey(fnString, args, context, fnHash);
   
   // Check if there's already an in-flight promise for this request
   const existing = inFlightPromises.get(key);
