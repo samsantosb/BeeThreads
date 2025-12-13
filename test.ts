@@ -362,80 +362,6 @@ async function runTests(): Promise<void> {
 
   await beeThreads.shutdown();
 
-  // ---------- STREAM ----------
-  section('beeThreads.stream()');
-
-  await test('streams generator yields', async () => {
-    const stream = beeThreads
-      .stream(function* () {
-        yield 1;
-        yield 2;
-        yield 3;
-      })
-      .usingParams()
-      .execute();
-
-    const chunks: number[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as number);
-    }
-    assert.deepStrictEqual(chunks, [1, 2, 3]);
-  });
-
-  await test('streams with arguments', async () => {
-    const stream = beeThreads
-      .stream(function* (start: number, count: number) {
-        for (let i = 0; i < count; i++) {
-          yield start + i;
-        }
-      })
-      .usingParams(10, 3)
-      .execute();
-
-    const chunks: number[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as number);
-    }
-    assert.deepStrictEqual(chunks, [10, 11, 12]);
-  });
-
-  await test('handles async yields in generator', async () => {
-    const stream = beeThreads
-      .stream(function* () {
-        yield Promise.resolve(1);
-        yield Promise.resolve(2);
-      })
-      .usingParams()
-      .execute();
-
-    const chunks: number[] = [];
-    for await (const chunk of stream) {
-      // Generator yields Promises, so we await each chunk
-      chunks.push(await chunk);
-    }
-    assert.deepStrictEqual(chunks, [1, 2]);
-  });
-
-  await test('captures generator return value', async () => {
-    const stream = beeThreads
-      .stream(function* () {
-        yield 1;
-        yield 2;
-        return 'final';
-      })
-      .usingParams()
-      .execute();
-
-    const chunks: number[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as number);
-    }
-    assert.deepStrictEqual(chunks, [1, 2]);
-    assert.strictEqual(stream.returnValue, 'final');
-  });
-
-  await beeThreads.shutdown();
-
   // ---------- INPUT VALIDATION ----------
   section('Input Validation');
 
@@ -484,13 +410,6 @@ async function runTests(): Promise<void> {
   await test('configure() throws for zero poolSize', () => {
     assert.throws(
       () => beeThreads.configure({ poolSize: 0 }),
-      TypeError
-    );
-  });
-
-  await test('stream() throws TypeError for non-function', () => {
-    assert.throws(
-      () => beeThreads.stream('not a generator' as any),
       TypeError
     );
   });
@@ -774,27 +693,6 @@ async function runTests(): Promise<void> {
     assert.deepStrictEqual(result, { value: 130 });
   });
 
-  await test('setContext() works with stream/generators', async () => {
-    const ctxMultiplier = 2;
-    
-    const stream = beeThreads
-      .stream(function* (count: number) {
-        for (let idx = 1; idx <= count; idx++) {
-          yield idx * ctxMultiplier;
-        }
-      })
-      .usingParams(3)
-      .setContext({ ctxMultiplier })
-      .execute();
-    
-    const chunks: number[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as number);
-    }
-    
-    assert.deepStrictEqual(chunks, [2, 4, 6]);
-  });
-
   await beeThreads.shutdown();
 
   // ---------- USING PARAMS ----------
@@ -919,21 +817,6 @@ async function runTests(): Promise<void> {
       .run(() => 'direct execute')
       .execute();
     assert.strictEqual(result, 'direct execute');
-  });
-
-  await test('stream execute() works without usingParams()', async () => {
-    const stream = beeThreads
-      .stream(function* () {
-        yield 'a';
-        yield 'b';
-      })
-      .execute();
-
-    const chunks: string[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as string);
-    }
-    assert.deepStrictEqual(chunks, ['a', 'b']);
   });
 
   await beeThreads.shutdown();
@@ -1080,79 +963,7 @@ async function runTests(): Promise<void> {
     assert.strictEqual(result, 3);
   });
 
-  await test('stream transfer() passes ArrayBuffer to generator worker', async () => {
-    const buffer = new ArrayBuffer(8);
-    const view = new Uint8Array(buffer);
-    view[0] = 10;
-    view[1] = 20;
-
-    const stream = beeThreads
-      .stream(function* (buf: ArrayBuffer) {
-        const arr = new Uint8Array(buf);
-        yield arr[0];
-        yield arr[1];
-      })
-      .usingParams(buffer)
-      .transfer([buffer])
-      .execute();
-
-    const chunks: number[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as number);
-    }
-    assert.deepStrictEqual(chunks, [10, 20]);
-    // Buffer should be detached after transfer
-    assert.strictEqual(buffer.byteLength, 0);
-  });
-
   await beeThreads.shutdown();
-
-  // ---------- STREAM ERROR HANDLING ----------
-  section('Stream Error Handling');
-
-  await beeThreads.shutdown();
-
-  await test('stream handles generator errors', async () => {
-    const stream = beeThreads
-      .stream(function* () {
-        yield 1;
-        throw new Error('generator error');
-      })
-      .execute();
-
-    const chunks: number[] = [];
-    try {
-      for await (const chunk of stream) {
-        chunks.push(chunk as number);
-      }
-      assert.fail('Should have thrown');
-    } catch (err: unknown) {
-      const error = err as Error;
-      assert.strictEqual(error.message, 'generator error');
-      assert.deepStrictEqual(chunks, [1]);
-    }
-  });
-
-  await beeThreads.shutdown();
-
-  await test('stream completes all values', async () => {
-    // Note: Early break/cancel causes worker termination (expected)
-    // This test verifies full stream consumption works
-    const stream = beeThreads
-      .stream(function* () {
-        yield 'first';
-        yield 'second';
-        yield 'third';
-      })
-      .execute();
-
-    const chunks: string[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as string);
-    }
-    
-    assert.deepStrictEqual(chunks, ['first', 'second', 'third']);
-  });
 
   // ---------- QUEUE FULL ERROR ----------
   section('QueueFullError');
@@ -1657,23 +1468,6 @@ async function runTests(): Promise<void> {
     }
     
     assert.deepStrictEqual(results, [0, 3, 6, 9, 12]);
-  });
-
-  await test('stream generator benefits from cache', async () => {
-    const results1: number[] = [];
-    const stream1 = beeThreads.stream(function* (n: number) {
-      for (let i = 0; i < n; i++) yield i;
-    }).usingParams(3).execute();
-    for await (const v of stream1) results1.push(v as number);
-    
-    const results2: number[] = [];
-    const stream2 = beeThreads.stream(function* (n: number) {
-      for (let i = 0; i < n; i++) yield i;
-    }).usingParams(3).execute();
-    for await (const v of stream2) results2.push(v as number);
-    
-    assert.deepStrictEqual(results1, [0, 1, 2]);
-    assert.deepStrictEqual(results2, [0, 1, 2]);
   });
 
   await beeThreads.shutdown();
@@ -3714,11 +3508,6 @@ async function runTests(): Promise<void> {
     assert.strictEqual(typeof executor.reconstructBuffers, 'function');
   });
 
-  await test('reconstructBuffers() method exists on stream executor', async () => {
-    const executor = beeThreads.stream(function* () { yield Buffer.from('test'); });
-    assert.strictEqual(typeof executor.reconstructBuffers, 'function');
-  });
-
   await test('without reconstructBuffers(), Buffer returns as Uint8Array', async () => {
     const result = await beeThreads
       .run(() => Buffer.from('hello world'))
@@ -3815,47 +3604,6 @@ async function runTests(): Promise<void> {
     assert.strictEqual(result.toString(), 'hello world');
   });
 
-  await test('stream reconstructBuffers() converts yielded Buffers', async () => {
-    const stream = beeThreads
-      .stream(function* () {
-        yield Buffer.from('chunk1');
-        yield Buffer.from('chunk2');
-        yield Buffer.from('chunk3');
-      })
-      .reconstructBuffers()
-      .execute();
-    
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as Buffer);
-    }
-    
-    assert.strictEqual(chunks.length, 3);
-    assert.ok(Buffer.isBuffer(chunks[0]), 'First chunk should be Buffer');
-    assert.ok(Buffer.isBuffer(chunks[1]), 'Second chunk should be Buffer');
-    assert.ok(Buffer.isBuffer(chunks[2]), 'Third chunk should be Buffer');
-    assert.strictEqual(chunks[0].toString(), 'chunk1');
-    assert.strictEqual(chunks[1].toString(), 'chunk2');
-    assert.strictEqual(chunks[2].toString(), 'chunk3');
-  });
-
-  await test('stream without reconstructBuffers() yields Uint8Array', async () => {
-    const stream = beeThreads
-      .stream(function* () {
-        yield Buffer.from('chunk');
-      })
-      .execute();
-    
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as Uint8Array);
-    }
-    
-    assert.strictEqual(chunks.length, 1);
-    assert.ok(chunks[0] instanceof Uint8Array, 'Chunk should be Uint8Array');
-    assert.ok(!Buffer.isBuffer(chunks[0]), 'Chunk should NOT be Buffer');
-  });
-
   await test('bee() with reconstructBuffers in beeClosures option', async () => {
     // bee() API doesn't have fluent .reconstructBuffers() 
     // but the underlying run() does - test that run works
@@ -3892,18 +3640,13 @@ async function runTests(): Promise<void> {
   section('Inline Workers (Bundler Compatibility)');
 
   // Import inline worker code for validation
-  const { INLINE_WORKER_CODE, INLINE_GENERATOR_WORKER_CODE } = require('./dist/inline-workers');
+  const { INLINE_WORKER_CODE } = require('./dist/inline-workers');
   const vm = require('vm');
 
   await test('INLINE: worker code is valid JavaScript', () => {
     // This will throw if syntax is invalid
     new vm.Script(INLINE_WORKER_CODE, { filename: 'inline-worker.js' });
     assert.ok(true, 'Worker code parsed successfully');
-  });
-
-  await test('INLINE: generator worker code is valid JavaScript', () => {
-    new vm.Script(INLINE_GENERATOR_WORKER_CODE, { filename: 'inline-generator.js' });
-    assert.ok(true, 'Generator worker code parsed successfully');
   });
 
   await test('INLINE: worker code includes turbo handler', () => {
@@ -3924,11 +3667,6 @@ async function runTests(): Promise<void> {
     // Verify the cache key includes context VALUES not just keys
     assert.ok(INLINE_WORKER_CODE.includes('JSON.stringify(context)'), 
       'Cache key should include full context values');
-  });
-
-  await test('INLINE: generator worker includes context/cache fix', () => {
-    assert.ok(INLINE_GENERATOR_WORKER_CODE.includes('JSON.stringify(context)'),
-      'Generator cache key should include full context values');
   });
 
   // ---------- TURBO OPTIMIZATIONS TESTS ----------

@@ -1,10 +1,35 @@
+version: '3.8'
+
 services:
-  benchmark:
+  # Node.js Benchmark
+  bench-node:
     build:
       context: ..
-      dockerfile: benchmarks/Dockerfile
-    container_name: bee-threads-benchmark
-    # Use all available CPUs
-    cpus: 0
-    # Increase memory for large array processing
-    mem_limit: 4g
+      dockerfile: benchmarks/Dockerfile.node
+    container_name: bee-threads-bench-node
+    volumes:
+      - ./results:/app/benchmarks/results
+    # Allocate resources for accurate benchmarks
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 8G
+    # Enable SharedArrayBuffer
+    ipc: host
+
+  # Bun Benchmark
+  bench-bun:
+    build:
+      context: ..
+      dockerfile: benchmarks/Dockerfile.bun
+    container_name: bee-threads-bench-bun
+    volumes:
+      - ./results:/app/benchmarks/results
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 8G
+    ipc: host
+

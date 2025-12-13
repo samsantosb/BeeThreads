@@ -1,0 +1,24 @@
+# Bun Benchmark Container
+FROM oven/bun:1
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY bun.lockb* ./
+
+# Install dependencies
+RUN bun install
+
+# Install piscina for comparison
+RUN bun add piscina
+
+# Copy source
+COPY . .
+
+# Build with tsc
+RUN bun run build
+
+# Run benchmarks  
+CMD ["sh", "-c", "bun benchmarks/bench-turbo.ts && bun benchmarks/bench-serialization.ts"]
+

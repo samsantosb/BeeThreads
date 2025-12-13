@@ -120,19 +120,6 @@ const buffer = await beeThreads
 Buffer.isBuffer(buffer) // true
 ```
 
-### `beeThreads.stream()` - Generators
-
-```ts
-const stream = beeThreads
-	.stream(function* (n: number) {
-		for (let i = 1; i <= n; i++) yield i * i
-	})
-	.usingParams(5)
-	.execute()
-
-for await (const value of stream) console.log(value) // 1, 4, 9, 16, 25
-```
-
 ---
 
 ## `beeThreads.turbo()` - Parallel Arrays

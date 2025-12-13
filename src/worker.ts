@@ -367,6 +367,25 @@ function applyCurried(fn: Function, args: unknown[]): unknown {
 // TURBO MODE HANDLER
 // ============================================================================
 
+// Pack types for serialization
+type PackType = 'none' | 'number' | 'string' | 'object' | 'shared';
+
+// Packed number array structure (V8: stable shape)
+interface PackedNumberArray {
+  readonly type: 0x01;
+  readonly length: number;
+  readonly data: Float64Array;
+}
+
+// Packed string array structure (V8: stable shape)
+interface PackedStringArray {
+  readonly type: 0x02;
+  readonly length: number;
+  readonly data: Uint8Array;
+  readonly offsets: Uint32Array;
+  readonly lengths: Uint32Array;
+}
+
 /**
  * Turbo message interface.
  * V8: Stable shape for all turbo messages.
@@ -374,7 +393,7 @@ function applyCurried(fn: Function, args: unknown[]): unknown {
 interface TurboMessage {
   type: 'turbo_map' | 'turbo_filter' | 'turbo_reduce';
   fn: string;
-  chunk?: unknown[];
+  chunk?: unknown;
   startIndex?: number;
   endIndex?: number;
   workerId: number;
@@ -384,6 +403,143 @@ interface TurboMessage {
   outputBuffer?: SharedArrayBuffer;
   controlBuffer?: SharedArrayBuffer;
   initialValue?: unknown;
+  /** Serialization type used */
+  packType?: PackType;
+  /** Packed object array data */
+  packedData?: PackedData;
+  /** Packed number array data */
+  packedNumbers?: PackedNumberArray;
+  /** Packed string array data */
+  packedStrings?: PackedStringArray;
+}
+
+// ============================================================================
+// AUTOPACK SUPPORT - Generic unpack for turbo mode
+// ============================================================================
+
+interface PackedSchema {
+  numericFields: Array<{ name: string }>;
+  stringFields: Array<{ name: string }>;
+  booleanFields: Array<{ name: string }>;
+}
+
+interface PackedData {
+  schema: PackedSchema;
+  length: number;
+  numbers: Float64Array;
+  strings: Uint8Array;
+  stringOffsets: Uint32Array;
+  stringLengths: Uint16Array;
+  booleans: Uint8Array;
+}
+
+/**
+ * Unpacks AutoPack data back into objects.
+ * Used by turbo mode when receiving packed data from main thread.
+ */
+function genericUnpack(packed: PackedData): Record<string, unknown>[] {
+  const { schema, length, numbers, strings, stringOffsets, stringLengths, booleans } = packed;
+  const { numericFields, stringFields, booleanFields } = schema;
+  if (length === 0) return [];
+  
+  const result: Record<string, unknown>[] = new Array(length);
+  const decoder = new TextDecoder();
+  const numCount = numericFields.length;
+  const strCount = stringFields.length;
+  const boolCount = booleanFields.length;
+  
+  for (let i = 0; i < length; i++) {
+    const obj: Record<string, unknown> = {};
+    for (let f = 0; f < numCount; f++) {
+      obj[numericFields[f].name] = numbers[f * length + i];
+    }
+    for (let f = 0; f < strCount; f++) {
+      const idx = f * length + i;
+      const offset = stringOffsets[idx];
+      const len = stringLengths[idx];
+      obj[stringFields[f].name] = decoder.decode(strings.subarray(offset, offset + len));
+    }
+    for (let f = 0; f < boolCount; f++) {
+      const bitIndex = f * length + i;
+      obj[booleanFields[f].name] = (booleans[Math.floor(bitIndex / 8)] & (1 << (bitIndex % 8))) !== 0;
+    }
+    result[i] = obj;
+  }
+  return result;
+}
+
+/**
+ * Unpacks number array from Float64Array.
+ * V8: Loop unrolling 4x.
+ */
+function unpackNumbers(packed: PackedNumberArray): number[] {
+  const len = packed.length;
+  if (len === 0) return [];
+  
+  const data = packed.data;
+  const result: number[] = new Array(len);
+  
+  // V8: Process in blocks of 4
+  const blockEnd = len & ~3;
+  let i = 0;
+  
+  for (; i < blockEnd; i += 4) {
+    result[i] = data[i];
+    result[i + 1] = data[i + 1];
+    result[i + 2] = data[i + 2];
+    result[i + 3] = data[i + 3];
+  }
+  
+  for (; i < len; i++) {
+    result[i] = data[i];
+  }
+  
+  return result;
+}
+
+// V8: Cached decoder instance (avoid allocation per call)
+const stringDecoder = new TextDecoder();
+
+/**
+ * Unpacks string array from packed format.
+ * V8: Loop unrolling for 4x throughput.
+ */
+function unpackStrings(packed: PackedStringArray): string[] {
+  const len = packed.length;
+  if (len === 0) return [];
+  
+  const data = packed.data;
+  const offsets = packed.offsets;
+  const lengths = packed.lengths;
+  const result: string[] = new Array(len);
+  
+  // V8: Process in blocks of 4
+  const blockEnd = len & ~3;
+  let i = 0;
+  
+  for (; i < blockEnd; i += 4) {
+    const o0 = offsets[i];
+    const o1 = offsets[i + 1];
+    const o2 = offsets[i + 2];
+    const o3 = offsets[i + 3];
+    const l0 = lengths[i];
+    const l1 = lengths[i + 1];
+    const l2 = lengths[i + 2];
+    const l3 = lengths[i + 3];
+    
+    result[i] = stringDecoder.decode(data.subarray(o0, o0 + l0));
+    result[i + 1] = stringDecoder.decode(data.subarray(o1, o1 + l1));
+    result[i + 2] = stringDecoder.decode(data.subarray(o2, o2 + l2));
+    result[i + 3] = stringDecoder.decode(data.subarray(o3, o3 + l3));
+  }
+  
+  // V8: Handle remainder
+  for (; i < len; i++) {
+    const o = offsets[i];
+    result[i] = stringDecoder.decode(data.subarray(o, o + lengths[i]));
+  }
+  
+  return result;
 }
 
 function isTurboMessage(msg: unknown): msg is TurboMessage {
@@ -438,44 +594,58 @@ function handleTurboMessage(message: TurboMessage): void {
       return;
     }
 
-    // Chunk-based mode (for regular arrays)
-    if (chunk) {
-      const chunkLen = chunk.length;
-      let result: unknown[];
+    // Determine the chunk based on pack type
+    let actualChunk: unknown[];
+    const packType = message.packType || 'none';
+    
+    if (packType === 'number' && message.packedNumbers) {
+      // Number array was packed
+      actualChunk = unpackNumbers(message.packedNumbers);
+    } else if (packType === 'string' && message.packedStrings) {
+      // String array was packed
+      actualChunk = unpackStrings(message.packedStrings);
+    } else if (packType === 'object' && message.packedData) {
+      // Object array was packed
+      actualChunk = genericUnpack(message.packedData);
+    } else if (chunk) {
+      // Regular chunk (no packing)
+      actualChunk = chunk as unknown[];
+    } else {
+      throw new Error('Turbo message missing chunk data');
+    }
+    
+    const chunkLen = actualChunk.length;
+    let result: unknown[];
 
-      if (type === 'turbo_map') {
-        // V8: Pre-allocated array
-        result = new Array(chunkLen);
-        for (let i = 0; i < chunkLen; i++) {
-          result[i] = fn(chunk[i], i);
-        }
-      } else if (type === 'turbo_filter') {
-        result = [];
-        for (let i = 0; i < chunkLen; i++) {
-          if (fn(chunk[i], i)) {
-            result.push(chunk[i]);
-          }
-        }
-      } else if (type === 'turbo_reduce') {
-        let acc = initialValue;
-        for (let i = 0; i < chunkLen; i++) {
-          acc = fn(acc, chunk[i], i);
-        }
-        result = [acc];
-      } else {
-        throw new Error(`Unknown turbo type: ${type}`);
+    if (type === 'turbo_map') {
+      result = new Array(chunkLen);
+      for (let i = 0; i < chunkLen; i++) {
+        result[i] = fn(actualChunk[i], i);
       }
-
-      port.postMessage({
-        type: 'turbo_complete',
-        workerId: message.workerId,
-        result: result,
-        itemsProcessed: chunkLen
-      });
-      return;
+    } else if (type === 'turbo_filter') {
+      result = [];
+      for (let i = 0; i < chunkLen; i++) {
+        if (fn(actualChunk[i], i)) {
+          result.push(actualChunk[i]);
+        }
+      }
+    } else if (type === 'turbo_reduce') {
+      let acc = initialValue;
+      for (let i = 0; i < chunkLen; i++) {
+        acc = fn(acc, actualChunk[i], i);
+      }
+      result = [acc];
+    } else {
+      throw new Error(`Unknown turbo type: ${type}`);
     }
 
-    throw new Error('Turbo message missing chunk or SharedArrayBuffer');
+    port.postMessage({
+      type: 'turbo_complete',
+      workerId: message.workerId,
+      result: result,
+      itemsProcessed: chunkLen
+    });
+    return;
 
   } catch (e) {
     port.postMessage({

@@ -2,7 +2,7 @@
 
 > Complete guide to architecture, internal decisions, and performance optimizations.
 
-**Version:** 3.4.0 (TypeScript)
+**Version:** 4.0.0 (TypeScript)
 
 ---
 
@@ -64,7 +64,6 @@ const result = await bee(x => x * 2)(21) // 42
 | **Function caching**   | LRU cache with vm.Script compilation                    |
 | **Worker affinity**    | Routes same function to same worker for V8 JIT benefits |
 | **TypeScript**         | Full type definitions included                          |
-| **Generators**         | Stream results with generator functions                 |
 | **Cancellation**       | AbortSignal support for task cancellation               |
 | **Retry**              | Automatic retry with exponential backoff                |
 | **Request Coalescing** | Deduplicates identical simultaneous calls               |
@@ -83,18 +82,18 @@ const result = await bee(x => x * 2)(21) // 42
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         index.ts (Public API)                           │
 │   • bee() - Simple curried API                                          │
-│   • beeThreads.run/withTimeout/stream                                   │
+│   • beeThreads.run/withTimeout/turbo/worker                             │
 │   • configure/shutdown/warmup/getPoolStats                              │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-           ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-           │ executor.ts  │ │stream-exec.ts│ │   pool.ts    │
-           │ Fluent API   │ │Generator API │ │ Worker mgmt  │
-           └──────────────┘ └──────────────┘ └──────────────┘
-                    │               │               │
-                    └───────────────┼───────────────┘
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+           ┌──────────────┐              ┌──────────────┐
+           │ executor.ts  │              │   pool.ts    │
+           │ Fluent API   │              │ Worker mgmt  │
+           └──────────────┘              └──────────────┘
+                    │                               │
+                    └───────────────┬───────────────┘
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        execution.ts (Task Engine)                       │
@@ -105,16 +104,12 @@ const result = await bee(x => x * 2)(21) // 42
 │   • Metrics tracking                                                    │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-              ┌─────────────────────┴──────────────────────┐
-              ▼                                            ▼
-┌─────────────────────────────┐             ┌─────────────────────────────┐
-│         worker.ts           │             │     generator-worker.ts     │
-│  • vm.Script compilation    │             │   • Streaming yields        │
-│  • LRU function cache       │             │   • Return value capture    │
-│  • Curried fn support       │             │   • Same optimizations      │
-│  • Console forwarding       │             │                             │
-│  • Error property preserve  │             │                             │
-└─────────────────────────────┘             └─────────────────────────────┘
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         worker.ts                                       │
+│  • vm.Script compilation    • LRU function cache    • Curried fn support│
+│  • Console forwarding       • Error property preserve                   │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -181,9 +176,6 @@ const MessageType = {
 	SUCCESS: 'success',
 	ERROR: 'error',
 	LOG: 'log',
-	YIELD: 'yield',
-	RETURN: 'return',
-	END: 'end',
 } as const
 
 // Logger interface (compatible with Pino, Winston, console)
@@ -208,7 +200,7 @@ Single source of truth for ALL mutable state. Makes debugging easier and testing
 **What it does:**
 
 -  Stores pool configuration (`poolSize`, `minThreads`, `timeout`, etc.)
--  Manages worker pools (`pools.normal`, `pools.generator`)
+-  Manages worker pool (`pools.normal`)
 -  Maintains O(1) counters for busy/idle workers
 -  Tracks execution metrics
 
@@ -216,7 +208,7 @@ Single source of truth for ALL mutable state. Makes debugging easier and testing
 
 ```typescript
 config // User settings (poolSize, timeout, retry, etc.)
-pools // Active workers { normal: Worker[], generator: Worker[] }
+pools // Active workers { normal: Worker[] }
 poolCounters // O(1) counters { busy: N, idle: N }
 queues // Pending tasks by priority { high: [], normal: [], low: [] }
 metrics // Execution statistics
@@ -352,66 +344,6 @@ setContext(context: Record<string, unknown>): Executor<T> {
 
 ---
 
-### `src/stream-executor.ts` - Generator Streaming
-
-**Why it exists:**
-Enables streaming results from generator functions.
-
-**What it does:**
-
--  Creates `ReadableStream` from generator functions
--  Streams yielded values as they're produced
--  Captures return value for access after completion
--  Handles cleanup on cancel
-
-**Chainable methods:**
-
-| Method                  | Description                                  |
-| ----------------------- | -------------------------------------------- |
-| `.usingParams(...args)` | Pass arguments to the generator              |
-| `.setContext(obj)`      | Inject external variables (closures)         |
-| `.transfer([...]))`     | Zero-copy for large binary data              |
-| `.reconstructBuffers()` | Convert Uint8Array back to Buffer in results |
-| `.execute()`            | Start streaming                              |
-
-**Example:**
-
-```js
-const stream = beeThreads
-	.stream(function* (n) {
-		for (let i = 1; i <= n; i++) {
-			yield i * i
-		}
-		return 'done'
-	})
-	.usingParams(5)
-	.execute()
-
-for await (const value of stream) {
-	console.log(value) // 1, 4, 9, 16, 25
-}
-
-console.log(stream.returnValue) // 'done'
-```
-
-**With Buffer reconstruction:**
-
-```js
-const stream = beeThreads
-	.stream(function* () {
-		yield require('fs').readFileSync('chunk1.bin')
-		yield require('fs').readFileSync('chunk2.bin')
-	})
-	.reconstructBuffers()
-	.execute()
-
-for await (const chunk of stream) {
-	console.log(Buffer.isBuffer(chunk)) // true ✅
-}
-```
-
----
-
 ### `src/cache.ts` - LRU Function Cache
 
 **Why it exists:**
@@ -486,33 +418,6 @@ function serializeError(e: unknown): SerializedError {
 ```
 
 **Technical Decision:** We check `e.name` instead of `instanceof Error` because errors from `vm.createContext()` have a different Error class.
-
----
-
-### `src/generator-worker.ts` - Generator Worker Script
-
-**Why it exists:**
-The code that runs inside worker threads for generator functions.
-
-**What it does:**
-
--  Same as `worker.ts` but handles generators
--  Streams yielded values back to main thread
--  Captures return value for final message
--  Handles async generators (yields that return Promises)
-
-**Message flow:**
-
-```
-Main Thread                    Worker Thread
-     |                              |
-     |-------- { fn, args } ------->|
-     |                              | (execute generator)
-     |<------ { type: YIELD } ------|
-     |<------ { type: YIELD } ------|
-     |<------ { type: RETURN } -----|
-     |<------ { type: END } --------|
-```
 
 ---
 
@@ -1279,18 +1184,6 @@ beeThreads.configure({
 9. pool.ts: Return worker to pool or process queued task
 ```
 
-### Generator Streaming
-
-```
-1. User calls beeThreads.stream(gen).execute()
-2. stream-executor.ts: Create ReadableStream, request worker
-3. generator-worker.ts: Execute generator
-4. For each yield: Send { type: YIELD, value }
-5. On return: Send { type: RETURN, value }, { type: END }
-6. stream-executor.ts: Enqueue values to ReadableStream
-7. User consumes with for-await-of
-```
-
 ---
 
 ## Error Handling
@@ -1462,10 +1355,9 @@ function detectBundlerMode(): boolean {
 	return false
 }
 
-export function getWorkerScript(type: PoolType): string {
+export function getWorkerScript(): string {
 	if (USE_INLINE_WORKERS) {
-		const code = type === 'generator' ? INLINE_GENERATOR_WORKER_CODE : INLINE_WORKER_CODE
-		return createWorkerDataUrl(code)
+		return createWorkerDataUrl(INLINE_WORKER_CODE)
 	}
 	return path.join(__dirname, 'worker.js')
 }

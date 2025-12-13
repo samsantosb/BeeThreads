@@ -33,7 +33,7 @@ import type { Worker } from 'worker_threads';
 // ============================================================================
 
 /** Type of worker pool */
-export type PoolType = 'normal' | 'generator';
+export type PoolType = 'normal';
 
 /** Task priority levels */
 export type Priority = 'high' | 'normal' | 'low';
@@ -225,12 +225,6 @@ export const MessageType = {
   ERROR: 'error',
   /** Console log forwarding */
   LOG: 'log',
-  /** Generator yield */
-  YIELD: 'yield',
-  /** Generator return value */
-  RETURN: 'return',
-  /** Generator/stream end */
-  END: 'end',
 } as const;
 
 /** Message type union */
@@ -316,41 +310,6 @@ export type WorkerResponseCompat =
   | LegacyErrorResponse;
 
 // ============================================================================
-// GENERATOR/STREAM TYPES
-// ============================================================================
-
-/** Generator yield message */
-export interface GeneratorYieldMessage {
-  type: typeof MessageType.YIELD;
-  value: unknown;
-}
-
-/** Generator return message */
-export interface GeneratorReturnMessage {
-  type: typeof MessageType.RETURN;
-  value: unknown;
-}
-
-/** Generator end message */
-export interface GeneratorEndMessage {
-  type: typeof MessageType.END;
-}
-
-/** Generator error message */
-export interface GeneratorErrorMessage {
-  type: typeof MessageType.ERROR;
-  error: SerializedError;
-}
-
-/** All generator message types (discriminated union) */
-export type GeneratorMessage =
-  | GeneratorYieldMessage
-  | GeneratorReturnMessage
-  | GeneratorEndMessage
-  | GeneratorErrorMessage
-  | WorkerLogMessage;
-
-// ============================================================================
 // METRICS TYPES
 // ============================================================================
 
@@ -409,7 +368,6 @@ export interface PoolStats {
 export interface FullPoolStats {
   maxSize: number;
   normal: PoolStats;
-  generator: PoolStats;
   config: {
     poolSize: number;
     minThreads: number;
@@ -444,11 +402,6 @@ export type WorkerFunction<TArgs extends unknown[] = unknown[], TReturn = unknow
 export type AsyncWorkerFunction<TArgs extends unknown[] = unknown[], TReturn = unknown> = (
   ...args: TArgs
 ) => Promise<TReturn>;
-
-/** Generator function for streaming */
-export type GeneratorWorkerFunction<TArgs extends unknown[] = unknown[], TYield = unknown, TReturn = unknown> = (
-  ...args: TArgs
-) => Generator<TYield, TReturn, unknown>;
 
 // ============================================================================
 // SAFE RESULT TYPES

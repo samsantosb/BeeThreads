@@ -1,0 +1,21 @@
+# Node.js Benchmark Container
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm ci
+
+# Install piscina for comparison
+RUN npm install piscina
+
+# Copy source
+COPY . .
+
+# Build
+RUN npm run build
+
+# Run benchmarks
+CMD ["sh", "-c", "echo '=== BENCHMARK: DIAGNOSTIC ===' && npx tsx benchmarks/bench-diagnostic.ts && echo '' && echo '=== BENCHMARK: TURBO ===' && npx tsx benchmarks/bench-turbo.ts && echo '' && echo '=== BENCHMARK: SERIALIZATION ===' && npx tsx benchmarks/bench-serialization.ts"]
+

@@ -34,7 +34,6 @@ import type {
 } from './types';
 import {
   INLINE_WORKER_CODE,
-  INLINE_GENERATOR_WORKER_CODE,
   createWorkerDataUrl
 } from './inline-workers';
 
@@ -113,38 +112,29 @@ function detectBundlerMode(): boolean {
 const USE_INLINE_WORKERS = detectBundlerMode();
 
 /**
- * Returns the worker script path/URL for the given pool type.
+ * Returns the worker script path/URL.
  * 
  * In bundler mode: returns data: URL with inline worker code
  * In normal mode: returns path to worker.js file
  * 
  * @internal
  */
-export function getWorkerScript(type: PoolType): string {
+export function getWorkerScript(_type: PoolType): string {
   if (USE_INLINE_WORKERS) {
-    const code = type === 'generator' 
-      ? INLINE_GENERATOR_WORKER_CODE 
-      : INLINE_WORKER_CODE;
-    return createWorkerDataUrl(code);
+    return createWorkerDataUrl(INLINE_WORKER_CODE);
   }
   
-  return type === 'generator'
-    ? path.join(__dirname, 'generator-worker.js')
-    : path.join(__dirname, 'worker.js');
+  return path.join(__dirname, 'worker.js');
 }
 
 /**
  * Paths to worker thread scripts.
- *
- * Two separate scripts exist because regular functions and generators
- * have different communication patterns with the main thread.
  * 
  * @deprecated Use getWorkerScript() instead for bundler compatibility.
  * @internal
  */
 export const SCRIPTS: Record<PoolType, string> = {
-  get normal() { return getWorkerScript('normal'); },
-  get generator() { return getWorkerScript('generator'); }
+  get normal() { return getWorkerScript('normal'); }
 };
 
 // ============================================================================
@@ -244,20 +234,14 @@ export const config: PoolConfig = {
 /**
  * Worker pools organized by type.
  *
- * Separate pools for normal and generator workers because they
- * have different behaviors and message protocols.
- *
  * @internal
  */
 export const pools: Record<PoolType, WorkerEntry[]> = {
-  normal: [],
-  generator: []
+  normal: []
 };
 
 /**
  * Fast counters for O(1) pool state checks.
- *
- * ## Why This Exists
  *
  * Instead of iterating the pool array to count busy/idle workers,
  * we maintain separate counters. This makes `getWorker()` faster
@@ -266,8 +250,7 @@ export const pools: Record<PoolType, WorkerEntry[]> = {
  * @internal
  */
 export const poolCounters: Record<PoolType, PoolCounters> = {
-  normal: { busy: 0, idle: 0 },
-  generator: { busy: 0, idle: 0 }
+  normal: { busy: 0, idle: 0 }
 };
 
 /**
@@ -279,8 +262,7 @@ export const poolCounters: Record<PoolType, PoolCounters> = {
  * @internal
  */
 export const queues: Record<PoolType, PriorityQueues> = {
-  normal: { high: [], normal: [], low: [] },
-  generator: { high: [], normal: [], low: [] }
+  normal: { high: [], normal: [], low: [] }
 };
 
 /**

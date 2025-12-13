@@ -17,7 +17,16 @@
 
 import { config } from './config';
 import { requestWorker, releaseWorker, fastHash } from './pool';
-import { canAutoPack } from './autopack';
+import { 
+  autoPack, 
+  makeTransferable, 
+  getTransferablesFromPacked,
+  packNumberArray,
+  getNumberArrayTransferables,
+  packStringArray,
+  getStringArrayTransferables
+} from './autopack';
+import type { TransferablePackedData, PackedNumberArray, PackedStringArray } from './autopack';
 import type { WorkerEntry, WorkerInfo } from './types';
 import type { Worker } from 'worker_threads';
 
@@ -31,9 +40,10 @@ const MIN_ITEMS_PER_WORKER = 1_000;
 /**
  * Minimum array size where AutoPack provides performance benefit.
  * Below this threshold, structuredClone overhead is acceptable.
- * Based on benchmarks: AutoPack wins at ~50+ objects.
+ * 
+ * Threshold: 500 items (consistent for BUN and Node)
  */
-const AUTOPACK_THRESHOLD = 50;
+const AUTOPACK_THRESHOLD = 500;
 
 // ============================================================================
 // TYPES
@@ -50,7 +60,7 @@ export interface TurboOptions {
   context?: Record<string, unknown>;
   /** 
    * Enable/disable AutoPack serialization for object arrays.
-   * - `'auto'` (default): Enable when array has 50+ objects with supported types
+   * - `'auto'` (default): Enable when array has 500+ objects with supported types
    * - `true`: Always use AutoPack (throws if data not compatible)
    * - `false`: Never use AutoPack, use structuredClone
    * 
@@ -82,6 +92,10 @@ export interface TurboResult<T> {
   stats: TurboStats;
 }
 
+// Serialization types for different array types
+// V8: Use numeric codes for faster switch
+type PackType = 'none' | 'number' | 'string' | 'object' | 'shared';
+
 // Monomorphic message shape - all properties declared upfront
 interface TurboWorkerMessage {
   type: 'turbo_map' | 'turbo_reduce' | 'turbo_filter';
@@ -96,6 +110,11 @@ interface TurboWorkerMessage {
   controlBuffer: SharedArrayBuffer | undefined;
   chunk: unknown[] | undefined;
   initialValue: unknown | undefined;
+  // Serialization support
+  packType: PackType;
+  packedData: TransferablePackedData | undefined;
+  packedNumbers: PackedNumberArray | undefined;
+  packedStrings: PackedStringArray | undefined;
 }
 
 // Monomorphic response shape
@@ -108,70 +127,84 @@ interface TurboWorkerResponse {
 }
 
 // ============================================================================
-// TYPED ARRAY DETECTION (V8: for loop, no .some())
+// TYPED ARRAY DETECTION - V8 OPTIMIZED
 // ============================================================================
-
-const TYPED_ARRAY_CONSTRUCTORS = [
-  Float64Array, Float32Array,
-  Int32Array, Int16Array, Int8Array,
-  Uint32Array, Uint16Array, Uint8Array, Uint8ClampedArray
-];
 
 type NumericTypedArray = 
   | Float64Array | Float32Array
   | Int32Array | Int16Array | Int8Array
   | Uint32Array | Uint16Array | Uint8Array | Uint8ClampedArray;
 
+/**
+ * V8: ArrayBuffer.isView is fastest for TypedArray detection.
+ * Excludes DataView via constructor name check.
+ */
 function isTypedArray(value: unknown): value is NumericTypedArray {
-  if (value === null || typeof value !== 'object') return false;
-  const len = TYPED_ARRAY_CONSTRUCTORS.length;
-  for (let i = 0; i < len; i++) {
-    if (value instanceof TYPED_ARRAY_CONSTRUCTORS[i]) return true;
-  }
-  return false;
+  // V8: Single call to native isView (C++ fast path)
+  if (!ArrayBuffer.isView(value)) return false;
+  // Exclude DataView (constructor.name[0] = 'D' = 68)
+  return (value.constructor.name.charCodeAt(0) !== 68);
 }
 
 /**
- * Determines if AutoPack should be used for the given data and options.
+ * Determines the best serialization strategy for the given data.
+ * V8: Inlined type detection, charCode lookup.
  * 
- * @param data - Array to check
- * @param options - Turbo options
- * @returns true if AutoPack should be used
+ * Returns:
+ * - 'shared': TypedArrays (uses SharedArrayBuffer)
+ * - 'number': number[] → Float64Array
+ * - 'string': string[] → Uint8Array UTF-8
+ * - 'object': object[] → AutoPack columnar
+ * - 'none': fallback to structuredClone
  */
-function shouldUseAutoPack(data: unknown[], options: TurboOptions): boolean {
-  const autoPackOption = options.autoPack ?? 'auto';
+function getPackType(data: unknown[], options: TurboOptions): PackType {
+  // V8: Direct property access
+  const autoPackOption = options.autoPack;
   
   // Explicit disable
-  if (autoPackOption === false) {
-    return false;
-  }
+  if (autoPackOption === false) return 'none';
   
-  // TypedArrays don't need AutoPack (already optimal with SharedArrayBuffer)
-  if (isTypedArray(data)) {
-    return false;
-  }
+  // TypedArrays use SharedArrayBuffer path
+  if (isTypedArray(data)) return 'shared';
   
-  // Check if data is compatible with AutoPack
-  const isCompatible = canAutoPack(data);
+  // Below threshold, don't pack
+  const len = data.length;
+  if (len === 0) return 'none';
+  if (autoPackOption !== true && len < AUTOPACK_THRESHOLD) return 'none';
   
-  // Explicit enable - throw if not compatible
-  if (autoPackOption === true) {
-    if (!isCompatible) {
-      throw new TypeError(
-        'AutoPack enabled but data is not compatible. ' +
-        'AutoPack requires arrays of objects with primitive values (number, string, boolean). ' +
-        'Set autoPack: false to use structuredClone instead.'
-      );
+  // V8: Inline type detection (charCode lookup)
+  const sample = data[0];
+  const t = typeof sample;
+  const c = t.charCodeAt(0);
+  
+  // 'n' = 110 = number → Float64Array
+  if (c === 110) return 'number';
+  
+  // 's' = 115 = string (check second char: 't'=116 vs 'y'=121)
+  if (c === 115 && t.charCodeAt(1) === 116) return 'string';
+  
+  // 'o' = 111 = object
+  if (c === 111 && sample !== null && !Array.isArray(sample)) {
+    // Validate object fields
+    const obj = sample as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    const keyLen = keys.length;
+    
+    for (let i = 0; i < keyLen; i++) {
+      const val = obj[keys[i]];
+      const vt = typeof val;
+      const vc = vt.charCodeAt(0);
+      
+      // Reject unsupported types
+      if (vc === 102) return 'none'; // function
+      if (vc === 115 && vt.charCodeAt(1) === 121) return 'none'; // symbol
+      if (vc === 98 && vt.length === 6) return 'none'; // bigint
+      if (vc === 111 && val !== null && Array.isArray(val)) return 'none';
     }
-    return true;
+    return 'object';
   }
   
-  // Auto mode - use if compatible AND above threshold
-  if (autoPackOption === 'auto') {
-    return isCompatible && data.length >= AUTOPACK_THRESHOLD;
-  }
-  
-  return false;
+  return 'none';
 }
 
 
@@ -279,7 +312,7 @@ async function executeTurboMapWithStats<T>(
     return executeTurboTypedArray<T>(fnString, data as NumericTypedArray, actualWorkers, chunkSize, options, startTime);
   }
 
-  // Regular array path
+  // Regular array path (with AutoPack support)
   return executeTurboRegularArray<T>(fnString, data, actualWorkers, chunkSize, options, startTime);
 }
 
@@ -336,7 +369,11 @@ async function executeTurboTypedArray<T>(
       outputBuffer: outputBuffer,
       controlBuffer: controlBuffer,
       chunk: undefined,
-      initialValue: undefined
+      initialValue: undefined,
+      packType: 'shared',
+      packedData: undefined,
+      packedNumbers: undefined,
+      packedStrings: undefined
     };
 
     promises[i] = executeWorkerTurbo(fnString, message);
@@ -347,8 +384,7 @@ async function executeTurboTypedArray<T>(
   if (workerCount === numWorkers) {
     await Promise.all(promises);
   } else {
-    // Only slice if we didn't fill the array
-  await Promise.all(promises.slice(0, workerCount));
+    await Promise.all(promises.slice(0, workerCount));
   }
 
   // Build result (V8: pre-allocated array)
@@ -375,7 +411,7 @@ async function executeTurboTypedArray<T>(
 }
 
 // ============================================================================
-// REGULAR ARRAY EXECUTION - CHUNK BASED (OPTIMIZED + AUTOPACK)
+// REGULAR ARRAY EXECUTION - WITH AUTOPACK
 // ============================================================================
 
 async function executeTurboRegularArray<T>(
@@ -388,6 +424,9 @@ async function executeTurboRegularArray<T>(
 ): Promise<TurboResult<T>> {
   const dataLength = data.length;
   const fnHash = fastHash(fnString);
+  
+  // Determine serialization strategy
+  const packType = getPackType(data, options);
 
   // Calculate chunk boundaries (V8: pre-allocated, no slice yet)
   const chunkBounds: Array<{ start: number; end: number }> = new Array(numWorkers);
@@ -417,7 +456,7 @@ async function executeTurboRegularArray<T>(
 
   for (let i = 0; i < chunkCount; i++) {
     const { start, end } = chunkBounds[i];
-    const chunk = data.slice(start, end); // Slice only when ready to send
+    const chunk = data.slice(start, end);
     const { entry, worker, temporary } = workers[i];
 
     promises[i] = executeTurboChunkDirect<T>(
@@ -430,7 +469,8 @@ async function executeTurboRegularArray<T>(
       entry,
       worker,
       temporary,
-      () => aborted
+      () => aborted,
+      packType
     ).catch((err: Error) => {
       if (!aborted) {
         aborted = true;
@@ -469,15 +509,12 @@ async function executeTurboRegularArray<T>(
   const executionTime = Date.now() - startTime;
   const estimatedSingle = executionTime * chunkCount * 0.7;
 
-  // Determine if AutoPack was used (for stats)
-  const usedAutoPack = shouldUseAutoPack(data, options);
-
   const stats: TurboStats = {
     totalItems: dataLength,
     workersUsed: chunkCount,
     itemsPerWorker: Math.ceil(dataLength / chunkCount),
-    usedSharedMemory: false,
-    usedAutoPack: usedAutoPack,
+    usedSharedMemory: packType === 'shared',
+    usedAutoPack: packType !== 'none' && packType !== 'shared',
     executionTime: executionTime,
     speedupRatio: (estimatedSingle / executionTime).toFixed(1) + 'x'
   };
@@ -486,7 +523,7 @@ async function executeTurboRegularArray<T>(
 }
 
 // ============================================================================
-// FILTER EXECUTION (OPTIMIZED)
+// FILTER EXECUTION
 // ============================================================================
 
 async function executeTurboFilter<T>(
@@ -526,14 +563,14 @@ async function executeTurboFilter<T>(
     chunkCount++;
   }
 
-  // OPTIMIZATION: Batch worker acquisition
+  // Batch worker acquisition
   const workerRequests: Promise<WorkerInfo>[] = new Array(chunkCount);
   for (let i = 0; i < chunkCount; i++) {
     workerRequests[i] = requestWorker('normal', 'high', fnHash);
   }
   const workers = await Promise.all(workerRequests);
 
-  // Execute in parallel with pre-acquired workers
+  // Execute in parallel
   const promises: Promise<unknown[]>[] = new Array(chunkCount);
   for (let i = 0; i < chunkCount; i++) {
     const { start, end } = chunkBounds[i];
@@ -544,21 +581,19 @@ async function executeTurboFilter<T>(
 
   const chunkResults = await Promise.all(promises);
 
-  // Merge with pre-calculated offsets
+  // Merge results
   let totalSize = 0;
-  const offsets: number[] = new Array(chunkCount);
   for (let i = 0; i < chunkCount; i++) {
-    offsets[i] = totalSize;
     totalSize += chunkResults[i].length;
   }
 
   const result: T[] = new Array(totalSize);
+  let offset = 0;
   for (let i = 0; i < chunkCount; i++) {
     const chunkResult = chunkResults[i];
     const chunkLen = chunkResult.length;
-    const offset = offsets[i];
     for (let j = 0; j < chunkLen; j++) {
-      result[offset + j] = chunkResult[j] as T;
+      result[offset++] = chunkResult[j] as T;
     }
   }
 
@@ -566,7 +601,7 @@ async function executeTurboFilter<T>(
 }
 
 // ============================================================================
-// REDUCE EXECUTION (OPTIMIZED)
+// REDUCE EXECUTION
 // ============================================================================
 
 async function executeTurboReduce<R>(
@@ -605,14 +640,14 @@ async function executeTurboReduce<R>(
     chunkCount++;
   }
 
-  // OPTIMIZATION: Batch worker acquisition
+  // Batch worker acquisition
   const workerRequests: Promise<WorkerInfo>[] = new Array(chunkCount);
   for (let i = 0; i < chunkCount; i++) {
     workerRequests[i] = requestWorker('normal', 'high', fnHash);
   }
   const workers = await Promise.all(workerRequests);
 
-  // Phase 1: Parallel reduction per chunk with pre-acquired workers
+  // Phase 1: Parallel reduction per chunk
   const promises: Promise<R>[] = new Array(chunkCount);
   for (let i = 0; i < chunkCount; i++) {
     const { start, end } = chunkBounds[i];
@@ -623,7 +658,7 @@ async function executeTurboReduce<R>(
 
   const chunkResults = await Promise.all(promises);
 
-  // Phase 2: Final reduction (V8: raw for loop)
+  // Phase 2: Final reduction
   const fn = new Function('return ' + fnString)();
   let result = initialValue;
   for (let i = 0; i < chunkCount; i++) {
@@ -657,7 +692,6 @@ async function executeWorkerTurbo(
     };
 
     const onMessage = (msg: TurboWorkerResponse): void => {
-      // V8: Direct property access, no nested ternary
       const msgType = msg.type;
       if (msgType === 'turbo_complete') {
         cleanup();
@@ -682,7 +716,7 @@ async function executeWorkerTurbo(
   });
 }
 
-// OPTIMIZED: Uses pre-acquired worker - no await inside
+// Turbo chunk execution with serialization support
 function executeTurboChunkDirect<T>(
   fnString: string,
   fnHash: string,
@@ -693,10 +727,10 @@ function executeTurboChunkDirect<T>(
   entry: WorkerEntry,
   worker: Worker,
   temporary: boolean,
-  shouldAbort: () => boolean
+  shouldAbort: () => boolean,
+  packType: PackType = 'none'
 ): Promise<T[]> {
   if (shouldAbort()) {
-    // Release the pre-acquired worker before throwing
     releaseWorker(entry, worker, temporary, 'normal', 0, false, fnHash);
     return Promise.reject(new Error('Turbo execution aborted'));
   }
@@ -739,7 +773,33 @@ function executeTurboChunkDirect<T>(
     worker.on('message', onMessage);
     worker.on('error', onError);
 
-    // V8: Monomorphic message
+    // Prepare message based on pack type
+    let packedData: TransferablePackedData | undefined;
+    let packedNumbers: PackedNumberArray | undefined;
+    let packedStrings: PackedStringArray | undefined;
+    let transferables: ArrayBuffer[] = [];
+    let actualPackType = packType;
+
+    try {
+      if (packType === 'number') {
+        // Number array → Float64Array
+        packedNumbers = packNumberArray(chunk as number[]);
+        transferables = getNumberArrayTransferables(packedNumbers);
+      } else if (packType === 'string') {
+        // String array → UTF-8 bytes
+        packedStrings = packStringArray(chunk as string[]);
+        transferables = getStringArrayTransferables(packedStrings);
+      } else if (packType === 'object') {
+        // Object array → AutoPack columnar
+        const packed = autoPack(chunk as Record<string, unknown>[]);
+        packedData = makeTransferable(packed);
+        transferables = getTransferablesFromPacked(packedData);
+      }
+    } catch {
+      // Fallback to structuredClone if packing fails
+      actualPackType = 'none';
+    }
+
     const message: TurboWorkerMessage = {
       type: 'turbo_map',
       fn: fnString,
@@ -751,15 +811,24 @@ function executeTurboChunkDirect<T>(
       inputBuffer: undefined,
       outputBuffer: undefined,
       controlBuffer: undefined,
-      chunk: chunk,
-      initialValue: undefined
+      chunk: actualPackType === 'none' ? chunk : undefined,
+      initialValue: undefined,
+      packType: actualPackType,
+      packedData: packedData,
+      packedNumbers: packedNumbers,
+      packedStrings: packedStrings
     };
 
-    worker.postMessage(message);
+    // Use transferables for zero-copy
+    if (transferables.length > 0) {
+      worker.postMessage(message, transferables);
+    } else {
+      worker.postMessage(message);
+    }
   });
 }
 
-// OPTIMIZED: Uses pre-acquired worker for filter
+// Filter chunk execution
 function executeFilterChunkDirect(
   fnString: string,
   fnHash: string,
@@ -807,12 +876,16 @@ function executeFilterChunkDirect(
       chunk: chunk,
       workerId: workerId,
       totalWorkers: totalWorkers,
-      context: context
+      context: context,
+      packType: 'none',
+      packedData: undefined,
+      packedNumbers: undefined,
+      packedStrings: undefined
     });
   });
 }
 
-// OPTIMIZED: Uses pre-acquired worker for reduce
+// Reduce chunk execution
 function executeReduceChunkDirect<R>(
   fnString: string,
   fnHash: string,
@@ -863,7 +936,11 @@ function executeReduceChunkDirect<R>(
       initialValue: initialValue,
       workerId: workerId,
       totalWorkers: totalWorkers,
-      context: context
+      context: context,
+      packType: 'none',
+      packedData: undefined,
+      packedNumbers: undefined,
+      packedStrings: undefined
     });
   });
 }
@@ -929,7 +1006,11 @@ async function fallbackSingleExecution<T>(
       chunk: chunk,
       workerId: 0,
       totalWorkers: 1,
-      context: options.context
+      context: options.context,
+      packType: 'none',
+      packedData: undefined,
+      packedNumbers: undefined,
+      packedStrings: undefined
     });
   });
 }
@@ -940,19 +1021,15 @@ async function fallbackSingleExecution<T>(
 
 /**
  * Compiles function with context injection for main thread execution.
- * Same logic as workers use - wraps function with context variables.
  */
 function compileWithContext(fnString: string, context?: Record<string, unknown>): Function {
   if (!context || Object.keys(context).length === 0) {
-    // No context - direct compilation
     return new Function('return ' + fnString)();
   }
   
-  // With context - inject variables
   const contextKeys = Object.keys(context);
   const contextValues = contextKeys.map(k => context[k]);
   
-  // Create wrapper function that receives context values as params
   const wrapperCode = `
     return function(${contextKeys.join(', ')}) {
       const fn = ${fnString};
@@ -964,9 +1041,7 @@ function compileWithContext(fnString: string, context?: Record<string, unknown>)
   return wrapper(...contextValues);
 }
 
-export interface MaxOptions extends TurboOptions {
-  // No additional options needed - uses same as turbo
-}
+export interface MaxOptions extends TurboOptions {}
 
 /**
  * @experimental
@@ -977,22 +1052,11 @@ export interface MaxOptions extends TurboOptions {
  * - You need 100% CPU utilization
  * - No HTTP requests/events need to be handled
  * - The workload is pure computation
- * 
- * @param data - Array or TypedArray to process
- * @param options - Max execution options
- * @returns TurboExecutor with map, filter, reduce methods
- * 
- * @example
- * ```typescript
- * // Max throughput - uses all cores including main thread
- * const result = await beeThreads.max(hugeArray).map(x => heavyComputation(x))
- * ```
  */
 export function createMaxExecutor<TItem>(
   data: TItem[] | NumericTypedArray,
   options: MaxOptions = {}
 ): TurboExecutor<TItem> {
-  // V8: Monomorphic object shape
   const executor: TurboExecutor<TItem> = {
     setWorkers(count: number): TurboExecutor<TItem> {
       if (!Number.isInteger(count) || count < 1) {
@@ -1045,14 +1109,14 @@ async function executeMaxMapWithStats<T>(
   options: MaxOptions,
   startTime: number
 ): Promise<TurboResult<T>> {
-  const dataLength = data.length;
+  // Convert TypedArray to regular array (max() doesn't support SharedArrayBuffer path)
+  const actualData = isTypedArray(data) ? Array.from(data) : data;
+  const dataLength = actualData.length;
 
-  // Small array fallback
   if (!options.force && dataLength < TURBO_THRESHOLD) {
-    return fallbackSingleExecution<T>(fnString, data, options, startTime);
+    return fallbackSingleExecution<T>(fnString, actualData, options, startTime);
   }
 
-  // Calculate workers + main thread
   const maxWorkers = options.workers !== undefined ? options.workers : config.poolSize;
   const calculatedWorkers = Math.ceil(dataLength / MIN_ITEMS_PER_WORKER);
   const numWorkers = calculatedWorkers < maxWorkers ? calculatedWorkers : maxWorkers;
@@ -1063,141 +1127,8 @@ async function executeMaxMapWithStats<T>(
   const chunkSize = options.chunkSize !== undefined ? options.chunkSize : Math.ceil(dataLength / totalThreads);
 
   const fnHash = fastHash(fnString);
-
-  // Calculate chunk boundaries for workers + main thread
-  const chunkBounds: Array<{ start: number; end: number }> = new Array(totalThreads);
-  let chunkCount = 0;
-
-  for (let i = 0; i < totalThreads; i++) {
-    const start = i * chunkSize;
-    if (start >= dataLength) break;
-    const end = start + chunkSize;
-    chunkBounds[i] = { start, end: end < dataLength ? end : dataLength };
-    chunkCount++;
-  }
-
-  // Last chunk is for main thread
-  const mainThreadChunkIndex = chunkCount - 1;
-  const workerChunks = chunkCount - 1;
-
-  // Batch worker acquisition (parallel)
-  const workerRequests: Promise<WorkerInfo>[] = new Array(workerChunks);
-  for (let i = 0; i < workerChunks; i++) {
-    workerRequests[i] = requestWorker('normal', 'high', fnHash);
-  }
-
-  // Start worker dispatches and main thread processing in parallel
-  const workers = await Promise.all(workerRequests);
-
-  // Dispatch to workers
-  const workerPromises: Promise<T[]>[] = new Array(workerChunks);
-  for (let i = 0; i < workerChunks; i++) {
-    const { start, end } = chunkBounds[i];
-    const chunk = data.slice(start, end);
-    const { entry, worker, temporary } = workers[i];
-
-    workerPromises[i] = executeTurboChunkDirect<T>(
-      fnString,
-      fnHash,
-      chunk,
-      i,
-      chunkCount,
-      options.context,
-      entry,
-      worker,
-      temporary,
-      () => false
-    );
-  }
-
-  // Main thread processes its chunk while workers run
-  const mainChunk = chunkBounds[mainThreadChunkIndex];
-  const mainChunkData = data.slice(mainChunk.start, mainChunk.end);
-  
-  // Compile function with context support
-  const fn = compileWithContext(fnString, options.context);
-  
-  // Process main thread chunk
-  const mainResult: T[] = new Array(mainChunkData.length);
-  for (let i = 0; i < mainChunkData.length; i++) {
-    mainResult[i] = fn(mainChunkData[i], mainChunk.start + i);
-  }
-
-  // Wait for all workers
-  const workerResults = await Promise.all(workerPromises);
-
-  // Merge results with pre-calculated offsets
-  let totalSize = 0;
-  const offsets: number[] = new Array(chunkCount);
-  
-  for (let i = 0; i < workerChunks; i++) {
-    offsets[i] = totalSize;
-    totalSize += workerResults[i].length;
-  }
-  offsets[mainThreadChunkIndex] = totalSize;
-  totalSize += mainResult.length;
-
-  const result: T[] = new Array(totalSize);
-  
-  // Copy worker results
-  for (let i = 0; i < workerChunks; i++) {
-    const chunkResult = workerResults[i];
-    const chunkLen = chunkResult.length;
-    const offset = offsets[i];
-    for (let j = 0; j < chunkLen; j++) {
-      result[offset + j] = chunkResult[j];
-    }
-  }
-  
-  // Copy main thread result
-  const offset = offsets[mainThreadChunkIndex];
-  for (let j = 0; j < mainResult.length; j++) {
-    result[offset + j] = mainResult[j];
-  }
-
-  const executionTime = Date.now() - startTime;
-  const estimatedSingle = executionTime * chunkCount * 0.7;
-
-  const stats: TurboStats = {
-    totalItems: dataLength,
-    workersUsed: chunkCount,
-    itemsPerWorker: Math.ceil(dataLength / chunkCount),
-    usedSharedMemory: false,
-    usedAutoPack: false,
-    executionTime: executionTime,
-    speedupRatio: (estimatedSingle / executionTime).toFixed(1) + 'x'
-  };
-
-  return { data: result, stats: stats };
-}
-
-async function executeMaxFilter<T>(
-  fnString: string,
-  data: unknown[],
-  options: MaxOptions
-): Promise<T[]> {
-  const dataLength = data.length;
-
-  // Small array fallback
-  if (!options.force && dataLength < TURBO_THRESHOLD) {
-    const fn = new Function('return ' + fnString)();
-    const result: T[] = [];
-    for (let i = 0; i < dataLength; i++) {
-      if (fn(data[i], i)) {
-        result.push(data[i] as T);
-      }
-    }
-    return result;
-  }
-
-  const fnHash = fastHash(fnString);
-  const maxWorkers = options.workers !== undefined ? options.workers : config.poolSize;
-  const calculatedWorkers = Math.ceil(dataLength / MIN_ITEMS_PER_WORKER);
-  const numWorkers = calculatedWorkers < maxWorkers ? calculatedWorkers : maxWorkers;
-  
-  // Main thread + workers
-  const totalThreads = numWorkers + 1;
-  const chunkSize = Math.ceil(dataLength / totalThreads);
+  // Force 'number' packType for converted TypedArrays (they're now number[])
+  const packType = isTypedArray(data) ? 'number' : getPackType(actualData, options);
 
   // Calculate chunk boundaries
   const chunkBounds: Array<{ start: number; end: number }> = new Array(totalThreads);
@@ -1219,13 +1150,140 @@ async function executeMaxFilter<T>(
   for (let i = 0; i < workerChunks; i++) {
     workerRequests[i] = requestWorker('normal', 'high', fnHash);
   }
+
   const workers = await Promise.all(workerRequests);
 
-  // Execute in parallel with pre-acquired workers
+  // Dispatch to workers
+  const workerPromises: Promise<T[]>[] = new Array(workerChunks);
+  for (let i = 0; i < workerChunks; i++) {
+    const { start, end } = chunkBounds[i];
+    const chunk = actualData.slice(start, end);
+    const { entry, worker, temporary } = workers[i];
+
+    workerPromises[i] = executeTurboChunkDirect<T>(
+      fnString,
+      fnHash,
+      chunk,
+      i,
+      chunkCount,
+      options.context,
+      entry,
+      worker,
+      temporary,
+      () => false,
+      packType
+    );
+  }
+
+  // Main thread processes its chunk while workers run
+  const mainChunk = chunkBounds[mainThreadChunkIndex];
+  const mainChunkData = actualData.slice(mainChunk.start, mainChunk.end);
+  
+  const fn = compileWithContext(fnString, options.context);
+  
+  const mainResult: T[] = new Array(mainChunkData.length);
+  for (let i = 0; i < mainChunkData.length; i++) {
+    mainResult[i] = fn(mainChunkData[i], mainChunk.start + i);
+  }
+
+  // Wait for all workers
+  const workerResults = await Promise.all(workerPromises);
+
+  // Merge results
+  let totalSize = 0;
+  const offsets: number[] = new Array(chunkCount);
+  
+  for (let i = 0; i < workerChunks; i++) {
+    offsets[i] = totalSize;
+    totalSize += workerResults[i].length;
+  }
+  offsets[mainThreadChunkIndex] = totalSize;
+  totalSize += mainResult.length;
+
+  const result: T[] = new Array(totalSize);
+  
+  for (let i = 0; i < workerChunks; i++) {
+    const chunkResult = workerResults[i];
+    const chunkLen = chunkResult.length;
+    const offset = offsets[i];
+    for (let j = 0; j < chunkLen; j++) {
+      result[offset + j] = chunkResult[j];
+    }
+  }
+  
+  const offset = offsets[mainThreadChunkIndex];
+  for (let j = 0; j < mainResult.length; j++) {
+    result[offset + j] = mainResult[j];
+  }
+
+  const executionTime = Date.now() - startTime;
+  const estimatedSingle = executionTime * chunkCount * 0.7;
+
+  const stats: TurboStats = {
+    totalItems: dataLength,
+    workersUsed: chunkCount,
+    itemsPerWorker: Math.ceil(dataLength / chunkCount),
+    usedSharedMemory: packType === 'shared',
+    usedAutoPack: packType !== 'none' && packType !== 'shared',
+    executionTime: executionTime,
+    speedupRatio: (estimatedSingle / executionTime).toFixed(1) + 'x'
+  };
+
+  return { data: result, stats: stats };
+}
+
+async function executeMaxFilter<T>(
+  fnString: string,
+  data: unknown[],
+  options: MaxOptions
+): Promise<T[]> {
+  // Convert TypedArray to regular array
+  const actualData = isTypedArray(data) ? Array.from(data) : data;
+  const dataLength = actualData.length;
+
+  if (!options.force && dataLength < TURBO_THRESHOLD) {
+    const fn = new Function('return ' + fnString)();
+    const result: T[] = [];
+    for (let i = 0; i < dataLength; i++) {
+      if (fn(actualData[i], i)) {
+        result.push(actualData[i] as T);
+      }
+    }
+    return result;
+  }
+
+  const fnHash = fastHash(fnString);
+  const maxWorkers = options.workers !== undefined ? options.workers : config.poolSize;
+  const calculatedWorkers = Math.ceil(dataLength / MIN_ITEMS_PER_WORKER);
+  const numWorkers = calculatedWorkers < maxWorkers ? calculatedWorkers : maxWorkers;
+  
+  const totalThreads = numWorkers + 1;
+  const chunkSize = Math.ceil(dataLength / totalThreads);
+
+  const chunkBounds: Array<{ start: number; end: number }> = new Array(totalThreads);
+  let chunkCount = 0;
+
+  for (let i = 0; i < totalThreads; i++) {
+    const start = i * chunkSize;
+    if (start >= dataLength) break;
+    const end = start + chunkSize;
+    chunkBounds[i] = { start, end: end < dataLength ? end : dataLength };
+    chunkCount++;
+  }
+
+  const mainThreadChunkIndex = chunkCount - 1;
+  const workerChunks = chunkCount - 1;
+
+  const workerRequests: Promise<WorkerInfo>[] = new Array(workerChunks);
+  for (let i = 0; i < workerChunks; i++) {
+    workerRequests[i] = requestWorker('normal', 'high', fnHash);
+  }
+  const workers = await Promise.all(workerRequests);
+
   const workerPromises: Promise<unknown[]>[] = new Array(workerChunks);
   for (let i = 0; i < workerChunks; i++) {
     const { start, end } = chunkBounds[i];
-    const chunk = data.slice(start, end);
+    const chunk = actualData.slice(start, end);
     const { entry, worker, temporary } = workers[i];
     workerPromises[i] = executeFilterChunkDirect(fnString, fnHash, chunk, i, chunkCount, options.context, entry, worker, temporary);
   }
@@ -1235,14 +1293,13 @@ async function executeMaxFilter<T>(
   const fn = compileWithContext(fnString, options.context);
   const mainResult: T[] = [];
   for (let i = mainChunk.start; i < mainChunk.end; i++) {
-    if (fn(data[i], i)) {
-      mainResult.push(data[i] as T);
+    if (fn(actualData[i], i)) {
+      mainResult.push(actualData[i] as T);
     }
   }
 
   const workerResults = await Promise.all(workerPromises);
 
-  // Merge with pre-calculated offsets
   let totalSize = mainResult.length;
   for (let i = 0; i < workerChunks; i++) {
     totalSize += workerResults[i].length;
@@ -1251,7 +1308,6 @@ async function executeMaxFilter<T>(
   const result: T[] = new Array(totalSize);
   let offset = 0;
   
-  // Copy worker results first
   for (let i = 0; i < workerChunks; i++) {
     const chunkResult = workerResults[i];
     const chunkLen = chunkResult.length;
@@ -1260,7 +1316,6 @@ async function executeMaxFilter<T>(
     }
   }
   
-  // Copy main result
   for (let j = 0; j < mainResult.length; j++) {
     result[offset++] = mainResult[j];
   }
@@ -1274,14 +1329,15 @@ async function executeMaxReduce<R>(
   initialValue: R,
   options: MaxOptions
 ): Promise<R> {
-  const dataLength = data.length;
+  // Convert TypedArray to regular array
+  const actualData = isTypedArray(data) ? Array.from(data) : data;
+  const dataLength = actualData.length;
 
-  // Small array fallback
   if (!options.force && dataLength < TURBO_THRESHOLD) {
     const fn = new Function('return ' + fnString)();
     let acc = initialValue;
     for (let i = 0; i < dataLength; i++) {
-      acc = fn(acc, data[i], i);
+      acc = fn(acc, actualData[i], i);
     }
     return acc;
   }
@@ -1291,11 +1347,9 @@ async function executeMaxReduce<R>(
   const calculatedWorkers = Math.ceil(dataLength / MIN_ITEMS_PER_WORKER);
   const numWorkers = calculatedWorkers < maxWorkers ? calculatedWorkers : maxWorkers;
   
-  // Main thread + workers
   const totalThreads = numWorkers + 1;
   const chunkSize = Math.ceil(dataLength / totalThreads);
 
-  // Calculate chunk boundaries
   const chunkBounds: Array<{ start: number; end: number }> = new Array(totalThreads);
   let chunkCount = 0;
 
@@ -1310,18 +1364,16 @@ async function executeMaxReduce<R>(
   const mainThreadChunkIndex = chunkCount - 1;
   const workerChunks = chunkCount - 1;
 
-  // Batch worker acquisition
   const workerRequests: Promise<WorkerInfo>[] = new Array(workerChunks);
   for (let i = 0; i < workerChunks; i++) {
     workerRequests[i] = requestWorker('normal', 'high', fnHash);
   }
   const workers = await Promise.all(workerRequests);
 
-  // Phase 1: Parallel reduction per chunk with pre-acquired workers
   const workerPromises: Promise<R>[] = new Array(workerChunks);
   for (let i = 0; i < workerChunks; i++) {
     const { start, end } = chunkBounds[i];
-    const chunk = data.slice(start, end);
+    const chunk = actualData.slice(start, end);
     const { entry, worker, temporary } = workers[i];
     workerPromises[i] = executeReduceChunkDirect<R>(fnString, fnHash, chunk, initialValue, i, chunkCount, options.context, entry, worker, temporary);
   }
@@ -1331,12 +1383,12 @@ async function executeMaxReduce<R>(
   const fn = compileWithContext(fnString, options.context);
   let mainAcc = initialValue;
   for (let i = mainChunk.start; i < mainChunk.end; i++) {
-    mainAcc = fn(mainAcc, data[i], i);
+    mainAcc = fn(mainAcc, actualData[i], i);
   }
 
   const workerResults = await Promise.all(workerPromises);
 
-  // Phase 2: Final reduction (combine all partial results)
+  // Final reduction
   let result = initialValue;
   for (let i = 0; i < workerChunks; i++) {
     result = fn(result, workerResults[i]);
@@ -1350,4 +1402,4 @@ async function executeMaxReduce<R>(
 // EXPORTS
 // ============================================================================
 
-export { TURBO_THRESHOLD, MIN_ITEMS_PER_WORKER };
+export { TURBO_THRESHOLD, MIN_ITEMS_PER_WORKER, AUTOPACK_THRESHOLD };

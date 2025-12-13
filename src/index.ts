@@ -37,7 +37,6 @@
 
 import { config, pools, poolCounters, queues, metrics, RUNTIME, IS_BUN } from './config';
 import { createCurriedRunner, Executor } from './executor';
-import { stream } from './stream-executor';
 import { warmupPool, getQueueLength } from './pool';
 import { validateTimeout, validatePoolSize, validateContextSecurity } from './validation';
 import { deepFreeze } from './utils';
@@ -271,11 +270,6 @@ export const beeThreads = {
   },
 
   /**
-   * Creates a stream executor for generator functions.
-   */
-  stream,
-
-  /**
    * Configures the worker pool settings.
    */
   configure(options: ConfigureOptions = {}): void {
@@ -370,10 +364,7 @@ export const beeThreads = {
     const targetCount = count ?? config.minThreads;
     if (targetCount <= 0) return;
 
-    await Promise.all([
-      warmupPool('normal', targetCount),
-      warmupPool('generator', targetCount)
-    ]);
+    await warmupPool('normal', targetCount);
   },
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -528,25 +519,19 @@ export const beeThreads = {
     // Clear in-flight promise cache (coalescing)
     clearInFlightPromises();
 
-    // Reject all queued tasks - using direct access (faster than array iteration)
+    // Reject all queued tasks
     const normalQueue = queues.normal;
-    const generatorQueue = queues.generator;
     
     // Drain all priority queues
     let task;
     while ((task = normalQueue.high.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
     while ((task = normalQueue.normal.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
     while ((task = normalQueue.low.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
-    while ((task = generatorQueue.high.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
-    while ((task = generatorQueue.normal.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
-    while ((task = generatorQueue.low.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
 
-    // Collect and clear pools - concat is faster than spread for 2 arrays
-    const allWorkers = pools.normal.concat(pools.generator);
+    // Collect and clear pools
+    const allWorkers = pools.normal;
     pools.normal = [];
-    pools.generator = [];
     poolCounters.normal = { busy: 0, idle: 0 };
-    poolCounters.generator = { busy: 0, idle: 0 };
 
     // Terminate all workers
     const len = allWorkers.length;
@@ -596,7 +581,6 @@ export const beeThreads = {
    */
   getPoolStats(): Readonly<FullPoolStats> {
     const normalPool = pools.normal;
-    const generatorPool = pools.generator;
 
     return deepFreeze({
       maxSize: config.poolSize,
@@ -612,29 +596,6 @@ export const beeThreads = {
           low: queues.normal.low.length
         },
         workers: normalPool.map(e => ({
-          id: e.id,
-          busy: e.busy,
-          tasksExecuted: e.tasksExecuted,
-          failedTasks: e.failedTasks,
-          avgExecutionTime: e.tasksExecuted > 0
-            ? Math.round(e.totalExecutionTime / e.tasksExecuted)
-            : 0,
-          temporary: e.temporary,
-          cachedFunctions: e.cachedFunctions?.size || 0
-        }))
-      },
-
-      generator: {
-        size: generatorPool.length,
-        busy: poolCounters.generator.busy,
-        idle: poolCounters.generator.idle,
-        queued: getQueueLength(queues.generator),
-        queueByPriority: {
-          high: queues.generator.high.length,
-          normal: queues.generator.normal.length,
-          low: queues.generator.low.length
-        },
-        workers: generatorPool.map(e => ({
           id: e.id,
           busy: e.busy,
           tasksExecuted: e.tasksExecuted,
@@ -826,7 +787,6 @@ export type { Runtime } from './config';
 
 // Re-export types from other modules
 export type { Executor } from './executor';
-export type { StreamExecutor, StreamResult } from './stream-executor';
 
 // Default export for convenience
 export default beeThreads;
