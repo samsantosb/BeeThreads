@@ -1,6 +1,6 @@
 {
   "name": "bee-threads",
-  "version": "4.0.1",
+  "version": "4.0.2",
   "description": "Handle threading as promises. Run CPU-intensive code in worker threads with a simple fluent API.",
   "main": "dist/index.js",
   "module": "dist/index.js",
