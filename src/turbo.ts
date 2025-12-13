@@ -327,9 +327,6 @@ async function executeTurboRegularArray<T>(
 ): Promise<TurboResult<T>> {
   const dataLength = data.length;
   
-  // Determine serialization strategy
-  const packType = getPackType(data, options);
-
   // Calculate chunk boundaries (V8: pre-allocated, no slice yet)
   const chunkBounds: Array<{ start: number; end: number }> = new Array(numWorkers);
   let chunkCount = 0;
@@ -980,9 +977,6 @@ async function executeMaxMapWithStats<T>(
   // Main thread gets a chunk too
   const totalThreads = actualWorkers + 1;
   const chunkSize = options.chunkSize !== undefined ? options.chunkSize : Math.ceil(dataLength / totalThreads);
-
-  // Force 'number' packType for converted TypedArrays (they're now number[])
-  const packType = isTypedArray(data) ? 'number' : getPackType(actualData, options);
 
   // Calculate chunk boundaries
   const chunkBounds: Array<{ start: number; end: number }> = new Array(totalThreads);
