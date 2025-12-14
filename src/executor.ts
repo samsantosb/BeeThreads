@@ -40,6 +40,7 @@
 
 import { config } from './config';
 import { execute } from './execution';
+import { fastHash } from './pool';
 import { validateFunction, validateFunctionSize, validateContextSecurity } from './validation';
 import type { Priority, ExecutionOptions, RetryOptions } from './types';
 
@@ -50,6 +51,7 @@ import type { Priority, ExecutionOptions, RetryOptions } from './types';
 /** Internal state for an executor instance */
 interface ExecutorState {
   fnString: string;
+  fnHash: string;
   options: ExecutionOptions;
   args: unknown[];
 }
@@ -76,7 +78,7 @@ export interface Executor<T = unknown> {
  * Creates an immutable, chainable executor.
  */
 export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
-  const { fnString, options, args } = state;
+  const { fnString, fnHash, options, args } = state;
 
   const executor: Executor<T> = {
     /**
@@ -85,6 +87,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
     usingParams(...params: unknown[]): Executor<T> {
       return createExecutor<T>({
         fnString,
+        fnHash,
         options,
         args: args.length > 0 ? args.concat(params) : params
       });
@@ -132,6 +135,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       }
       return createExecutor<T>({
         fnString,
+        fnHash,
         options: { ...options, context: serializedContext },
         args
       });
@@ -143,6 +147,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
     signal(abortSignal: AbortSignal): Executor<T> {
       return createExecutor<T>({
         fnString,
+        fnHash,
         options: { ...options, signal: abortSignal },
         args
       });
@@ -154,6 +159,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
     transfer(list: ArrayBufferLike[]): Executor<T> {
       return createExecutor<T>({
         fnString,
+        fnHash,
         options: { ...options, transfer: list },
         args
       });
@@ -172,6 +178,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       };
       return createExecutor<T>({
         fnString,
+        fnHash,
         options: {
           ...options,
           retry: mergedRetry
@@ -190,6 +197,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       }
       return createExecutor<T>({
         fnString,
+        fnHash,
         options: { ...options, priority: level },
         args
       });
@@ -208,6 +216,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
     noCoalesce(): Executor<T> {
       return createExecutor<T>({
         fnString,
+        fnHash,
         options: { ...options, skipCoalescing: true },
         args
       });
@@ -231,6 +240,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
     reconstructBuffers(): Executor<T> {
       return createExecutor<T>({
         fnString,
+        fnHash,
         options: { ...options, reconstructBuffers: true },
         args
       });
@@ -243,7 +253,8 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       return execute<T>(
         { toString: () => fnString },
         args,
-        { ...options, poolType: 'normal' }
+        { ...options, poolType: 'normal' },
+        fnHash
       ) as Promise<T>;
     }
   };
@@ -273,8 +284,12 @@ export function createCurriedRunner(
     // Security: Validate function size (DoS prevention)
     validateFunctionSize(fnString, config.security.maxFunctionSize);
     
+    // Compute hash once at executor creation (not at execute time)
+    const fnHash = fastHash(fnString);
+    
     return createExecutor<ReturnType<T>>({
       fnString,
+      fnHash,
       options: baseOptions,
       args: []
     });

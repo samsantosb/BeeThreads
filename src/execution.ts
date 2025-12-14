@@ -309,17 +309,23 @@ export async function executeOnce<T = unknown>(
 
 /**
  * Executes a function with optional retry logic and exponential backoff.
+ * 
+ * @param fn - Function to execute
+ * @param args - Arguments to pass to the function
+ * @param options - Execution options
+ * @param precomputedHash - Pre-computed function hash (optional, avoids recomputation)
  */
 export async function execute<T = unknown>(
   fn: Function | { toString(): string },
   args: unknown[],
-  options: ExecutionOptions & { retry?: RetryConfig } = {}
+  options: ExecutionOptions & { retry?: RetryConfig } = {},
+  precomputedHash?: string
 ): Promise<T | SafeResult<T>> {
   const { retry: retryOpts = config.retry, safe = false, context = null, skipCoalescing = false } = options;
   const fnString = fn.toString();
   
-  // Compute hash once at entry point
-  const fnHash = fastHash(fnString);
+  // Use pre-computed hash or compute now (fallback for direct execute() calls)
+  const fnHash = precomputedHash ?? fastHash(fnString);
 
   // Wrap execution in coalescing to deduplicate identical concurrent requests
   // Note: Coalescing is skipped for requests with AbortSignal (each needs its own lifecycle)
