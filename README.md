@@ -294,6 +294,67 @@ if (result.status === 'fulfilled') console.log(result.value)
 
 ---
 
+## Limitations (Inline Functions)
+
+When using `bee()`, `beeThreads.run()`, or `turbo()` (without `worker()`), data is transferred via [Structured Clone Algorithm](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm).
+
+### ✅ What CAN be passed as parameters
+
+| Type | Works |
+|------|-------|
+| Primitives (`string`, `number`, `boolean`, `null`, `undefined`, `BigInt`) | ✅ |
+| Arrays, Objects (POJOs) | ✅ |
+| `Date`, `RegExp`, `Map`, `Set` | ✅ |
+| `ArrayBuffer`, TypedArrays (`Uint8Array`, `Float64Array`, etc.) | ✅ |
+| `Error` (with custom properties) | ✅ |
+| Nested objects | ✅ |
+
+### ❌ What CANNOT be passed as parameters
+
+| Type | Why |
+|------|-----|
+| **Functions** | Not cloneable (use `setContext` instead) |
+| **Symbols** | Not cloneable |
+| **Class instances** | Lose prototype and methods |
+| **WeakMap, WeakSet** | Not cloneable |
+| **Circular references** | Not supported |
+| **Streams** | Not cloneable |
+
+### ⚠️ Closures Must Be Explicit
+
+Functions lose access to external variables when sent to workers:
+
+```ts
+// ❌ FAILS - x doesn't exist in worker
+const x = 10
+await bee((a) => a + x)(5) // ReferenceError: x is not defined
+
+// ✅ WORKS - pass x explicitly
+const x = 10
+await bee((a) => a + x)(5, { beeClosures: { x } }) // 15
+```
+
+```ts
+// ❌ FAILS - helper loses access to multiplier
+const multiplier = 2
+const helper = (n) => n * multiplier
+
+await beeThreads.run((x) => helper(x))
+	.setContext({ helper }) // helper is stringified, loses closure!
+	.usingParams(5)
+	.execute()
+
+// ✅ WORKS - pass all dependencies
+await beeThreads.run((x) => helper(x))
+	.setContext({ helper, multiplier })
+	.usingParams(5)
+	.execute() // 10
+```
+
+> **Need `require()`, database, or npm modules?** Use [`beeThreads.worker()`](#beethreadsworker---file-workers) instead.
+
+---
+
 ## Why bee-threads?
 
 - **Zero dependencies** - Lightweight and secure
